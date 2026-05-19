@@ -42,3 +42,6 @@ next-env.d.ts
 
 # Qdrant local data
 qdrant_storage/
+
+# logs
+logs/
