@@ -13,12 +13,14 @@ export default function Home() {
     if (!question.trim()) return;
 
     const userQuestion = question;
+    const assistantMessageId = crypto.randomUUID();
     setQuestion("");
     setLoading(true);
 
     setMessages((previous) => [
       ...previous,
-      { role: "user", content: userQuestion },
+      { id: crypto.randomUUID(), role: "user", content: userQuestion },
+      { id: assistantMessageId, role: "assistant", content: "" },
     ]);
 
     try {
@@ -26,30 +28,80 @@ export default function Home() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Accept: "text/event-stream",
         },
-        body: JSON.stringify({ question: userQuestion }),
+        body: JSON.stringify({ question: userQuestion, stream: true }),
       });
 
-      const data = await response.json();
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || "The chatbot request failed.");
+      }
 
-      setMessages((previous) => [
-        ...previous,
-        {
-          role: "assistant",
-          content: data.answer || data.error || "No answer returned.",
-        },
-      ]);
+      if (!response.body) {
+        throw new Error("The chatbot did not return a response stream.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+
+        for (const event of events) {
+          handleStreamEvent(event, assistantMessageId);
+        }
+      }
+
+      if (buffer.trim()) {
+        handleStreamEvent(buffer, assistantMessageId);
+      }
     } catch (error) {
-      setMessages((previous) => [
-        ...previous,
-        {
-          role: "assistant",
-          content: "Something went wrong while contacting the chatbot.",
-        },
-      ]);
+      updateAssistantMessage(
+        assistantMessageId,
+        error.message || "Something went wrong while contacting the chatbot.",
+        true
+      );
     } finally {
       setLoading(false);
     }
+  }
+
+  function handleStreamEvent(rawEvent, assistantMessageId) {
+    const lines = rawEvent.split("\n");
+    const eventType =
+      lines.find((line) => line.startsWith("event: "))?.slice(7) || "message";
+    const dataLine = lines.find((line) => line.startsWith("data: "));
+    if (!dataLine) return;
+
+    const data = JSON.parse(dataLine.slice(6));
+
+    if (eventType === "token") {
+      updateAssistantMessage(assistantMessageId, data);
+    }
+
+    if (eventType === "error") {
+      updateAssistantMessage(assistantMessageId, data.error, true);
+    }
+  }
+
+  function updateAssistantMessage(messageId, content, replace = false) {
+    setMessages((previous) =>
+      previous.map((message) =>
+        message.id === messageId
+          ? {
+              ...message,
+              content: replace ? content : message.content + content,
+            }
+          : message
+      )
+    );
   }
 
   return (
@@ -67,9 +119,9 @@ export default function Home() {
             </p>
           )}
 
-          {messages.map((message, index) => (
+          {messages.map((message) => (
             <div
-              key={index}
+              key={message.id}
               className={`mb-4 ${
                 message.role === "user" ? "text-right" : "text-left"
               }`}
@@ -82,12 +134,14 @@ export default function Home() {
                 }`}
               >
                 <strong>{message.role === "user" ? "You" : "Bot"}</strong>
-                <p className="mt-1 whitespace-pre-wrap">{message.content}</p>
+                <p className="mt-1 whitespace-pre-wrap">
+                  {message.content || "Thinking..."}
+                </p>
               </div>
             </div>
           ))}
 
-          {loading && <p className="text-gray-500">Thinking...</p>}
+          {loading && <p className="text-gray-500">Responding...</p>}
         </div>
 
         <form onSubmit={askQuestion} className="mt-4 flex gap-2">
@@ -99,9 +153,10 @@ export default function Home() {
           />
           <button
             type="submit"
-            className="rounded-xl bg-black px-5 py-3 font-medium text-white"
+            disabled={loading}
+            className="rounded-xl bg-black px-5 py-3 font-medium text-white disabled:cursor-not-allowed disabled:bg-gray-400"
           >
-            Ask
+            {loading ? "..." : "Ask"}
           </button>
         </form>
       </section>
