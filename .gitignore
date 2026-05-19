@@ -45,3 +45,6 @@ qdrant_storage/
 
 # logs
 logs/
+
+# pm2 deployment files
+pm2/
