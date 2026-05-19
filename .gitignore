@@ -40,5 +40,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# qdrant runtime data
-/qdrant_data
+# Qdrant local data
+qdrant_storage/
