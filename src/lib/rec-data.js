@@ -622,6 +622,10 @@ function answerConferenceOverview(snapshot) {
   ]).join(" ");
 }
 
+function answerConferenceDatesAndVenue(snapshot) {
+  return `${snapshot.conference.title} will run from ${formatConferenceDates(snapshot.conference)} at ${snapshot.conference.venue}, ${snapshot.conference.location}.`;
+}
+
 function answerDailyThemes(snapshot) {
   const days = getConferenceDays(snapshot.conference);
 
@@ -820,17 +824,32 @@ function answerScheduleByHall(snapshot, hall) {
 
 function getDayThemeMatch(normalized, snapshot) {
   const days = getConferenceDays(snapshot.conference);
+  const genericThemeTokens = new Set(["renewable", "energy"]);
 
   return days.find((day) => {
     const tokens = normalizeQuestion(day.theme || "")
       .split(/\W+/)
-      .filter((token) => token.length > 3);
+      .filter(
+        (token) => token.length > 3 && !genericThemeTokens.has(token)
+      );
+    if (tokens.length === 0) return false;
+
     const matchedTokens = tokens.filter((token) =>
       new RegExp(`\\b${token}\\b`).test(normalized)
     );
 
     return matchedTokens.length >= Math.min(2, tokens.length);
   });
+}
+
+function getThemeSources(snapshot, day) {
+  const days = getConferenceDays(snapshot.conference);
+  const dayNumber = getDayNumberFromDay(day, days.indexOf(day));
+
+  return snapshot.sessions
+    .filter((session) => session.day === dayNumber)
+    .slice(0, 8)
+    .map((session) => sourceFor("session", session, session.title));
 }
 
 function getDayNumberFromDay(day, index) {
@@ -997,8 +1016,8 @@ function groupRecommendedSessions(sessions) {
   return [...groups.values()];
 }
 
-function answerFinanceRecommendations(snapshot) {
-  const financeKeywords = [
+function getFinanceKeywords() {
+  return [
     "finance",
     "financier",
     "financiers",
@@ -1021,13 +1040,49 @@ function answerFinanceRecommendations(snapshot) {
     "private sector",
     "green industrialisation",
   ];
-  const ranked = snapshot.sessions
+}
+
+function getRankedFinanceSessions(snapshot) {
+  const financeKeywords = getFinanceKeywords();
+
+  return snapshot.sessions
     .map((session) => ({
       session,
       score: scoreSessionForKeywords(session, financeKeywords),
     }))
     .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => b.score - a.score);
+}
+
+function answerFinanceOneDayRecommendation(snapshot) {
+  const ranked = getRankedFinanceSessions(snapshot);
+
+  if (ranked.length === 0) {
+    return "I could not find sessions specifically related to finance or investment in the published programme.";
+  }
+
+  const scoreByDay = new Map();
+  for (const item of ranked) {
+    scoreByDay.set(item.session.day, (scoreByDay.get(item.session.day) || 0) + item.score);
+  }
+
+  const [bestDay] = [...scoreByDay.entries()].sort((a, b) => b[1] - a[1])[0];
+  const days = getConferenceDays(snapshot.conference);
+  const dayTheme = days.find((day, index) => getDayNumberFromDay(day, index) === bestDay);
+  const bestDaySessions = ranked
+    .filter((item) => item.session.day === bestDay)
+    .map((item) => item.session);
+  const themeText = dayTheme?.theme ? `: ${dayTheme.theme}` : "";
+
+  return `If you can only attend one day for finance or investment, I would choose Day ${bestDay}${themeText}. Relevant published sessions that day include: ${formatRecommendedSessions(bestDaySessions)}.`;
+}
+
+function answerFinanceRecommendations(snapshot, options = {}) {
+  if (options.oneDayOnly) {
+    return answerFinanceOneDayRecommendation(snapshot);
+  }
+
+  const ranked = getRankedFinanceSessions(snapshot)
     .map((item) => item.session);
   const groups = groupRecommendedSessions(ranked).slice(0, 4);
 
@@ -1323,6 +1378,380 @@ function answerDayThemeAttendance(snapshot, day) {
   ].join(" ");
 }
 
+function uniqueSources(sources) {
+  const seen = new Set();
+
+  return sources.filter((source) => {
+    const key = `${source.sourceType}:${source.rowId || source.source}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function getCompoundDirectAnswer(normalized, snapshot, sources) {
+  const parts = [];
+  const compoundSources = [...sources];
+  const conference = snapshot.conference;
+  const dayThemeMatch = getDayThemeMatch(normalized, snapshot);
+  const requestedDay = extractRequestedDay(normalized);
+  const requestedHall = findRequestedHall(normalized, snapshot);
+  const mentionedSession = findMentionedSession(normalized, snapshot.sessions);
+  const oneDayOnly = /\b(only have one day|just one day|single day|one day)\b/.test(
+    normalized
+  );
+  const wantsProgramOverview =
+    /(overview|summary|summarise|summarize|tell me about|give me).*(program|programme|agenda)|\b(program|programme|agenda)\s+overview\b/.test(
+      normalized
+    ) ||
+    (/\b(program|programme|agenda)\b/.test(normalized) &&
+      /(overview|summary|more|about|tell|give|what)/.test(normalized));
+  const wantsConferenceOverview =
+    /\btell me more\b/.test(normalized) ||
+    /(overview|summary|summarise|summarize|about|describe|introduce|what is).*(conference|rec|expo)\b/.test(
+      normalized
+    ) ||
+    /\b(conference|rec26|rec|expo)\s+overview\b/.test(normalized);
+
+  function addPart(answer, partSources = []) {
+    if (!answer) return;
+    parts.push(answer);
+    compoundSources.push(...partSources);
+  }
+
+  if (wantsProgramOverview) {
+    addPart(
+      answerProgramOverview(snapshot),
+      snapshot.programs.map((program) =>
+        sourceFor("program_overview", program, program.title)
+      )
+    );
+  }
+
+  if (wantsConferenceOverview && !wantsProgramOverview) {
+    addPart(answerConferenceOverview(snapshot), sources);
+  }
+
+  if (
+    !requestedHall &&
+    (!mentionedSession || /\b(conference|rec|expo|event)\b/.test(normalized)) &&
+    (/\b(date|dates|where|venue|location|take place|held)\b/.test(normalized) ||
+      (/\bwhen\b/.test(normalized) &&
+        /\b(conference|rec|expo|event|it)\b/.test(normalized) &&
+        !/\b(lunch|meal|tea|break|sessions?|forum)\b/.test(normalized)))
+  ) {
+    addPart(answerConferenceDatesAndVenue(snapshot), sources);
+  }
+
+  if (
+    mentionedSession &&
+    /\b(when|where|venue|time|schedule|details?|about|tell|sessions?|forum)\b/.test(
+      normalized
+    )
+  ) {
+    addPart(answerSpecificSession(mentionedSession, normalized), [
+      sourceFor("session", mentionedSession, mentionedSession.title),
+    ]);
+  }
+
+  if (/theme/.test(normalized) && !/\bsessions?\b/.test(normalized)) {
+    addPart(`The theme for ${conference.title} is "${conference.theme}".`, sources);
+  }
+
+  if (/(daily theme|day themes|focus areas|each day.*theme|daily focus)/.test(normalized)) {
+    addPart(answerDailyThemes(snapshot), sources);
+  }
+
+  if (/(contact|phone|email)/.test(normalized)) {
+    addPart(
+      compact([
+        conference.contactPhone ? `Phone: ${conference.contactPhone}` : null,
+        conference.contactEmail ? `Email: ${conference.contactEmail}` : null,
+      ]).join(". ") || "No public contact information is currently listed.",
+      sources
+    );
+  }
+
+  if (/(website|site|link|url)/.test(normalized)) {
+    addPart(
+      conference.mainWebsiteUrl
+        ? `The conference website is ${conference.mainWebsiteUrl}.`
+        : "No public website is currently listed.",
+      sources
+    );
+  }
+
+  if (/(register|registration)/.test(normalized)) {
+    const hasDeadlineQuestion = /\b(when|deadline|close|closes|closing|end|ends)\b/.test(
+      normalized
+    );
+    const status = conference.registrationOpen
+      ? `Registration is currently open for ${conference.title}.`
+      : conference.regClosedMessage ||
+        `Registration is currently closed for ${conference.title}.`;
+    addPart(
+      hasDeadlineQuestion
+        ? `${withTerminalPeriod(status)} I could not find a registration deadline in the published conference materials.`
+        : withTerminalPeriod(status),
+      sources
+    );
+  }
+
+  if (/(learn|expect|what do i expect|what will i learn)/.test(normalized)) {
+    addPart(
+      answerLearningOutcomes(snapshot),
+      snapshot.sessions
+        .filter((session) => session.theme && !/^tbc$/i.test(session.theme))
+        .slice(0, 8)
+        .map((session) => sourceFor("session", session, session.title))
+    );
+  }
+
+  if (/\b(new|beginner|first time|newcomer)\b/.test(normalized)) {
+    addPart(answerBeginnerGuidance(snapshot), sources);
+  }
+
+  if (
+    dayThemeMatch &&
+    /(attend|care|interested|focus|should|recommend|guide|what should)/.test(
+      normalized
+    )
+  ) {
+    addPart(
+      answerDayThemeAttendance(snapshot, dayThemeMatch),
+      getThemeSources(snapshot, dayThemeMatch)
+    );
+  }
+
+  if (
+    /(finance|financial|investment|investor|capital|bank|funding|fund|business)/.test(
+      normalized
+    ) &&
+    /(recommend|which|what|attend|session|sessions|relevant|relation|related|interested|guide|opportunit)/.test(
+      normalized
+    )
+  ) {
+    const rankedSessions = getRankedFinanceSessions(snapshot).map(
+      (item) => item.session
+    );
+
+    addPart(
+      answerFinanceRecommendations(snapshot, { oneDayOnly }),
+      rankedSessions
+        .slice(0, 6)
+        .map((session) => sourceFor("session", session, session.title))
+    );
+  }
+
+  if (
+    /(policy ?makers?|policymakers?|government|regulator|regulators|ministry|public sector)/.test(
+      normalized
+    ) &&
+    /(recommend|which|what|attend|session|sessions|useful|relevant|focus|interested)/.test(
+      normalized
+    )
+  ) {
+    const policySessions = findSessionsByTitleParts(snapshot, [
+      "sustainable energy development programme",
+      "subregional forum",
+      "world resource institute",
+      "united nations",
+      "uganda - european",
+    ]);
+
+    addPart(
+      answerPolicyRecommendations(snapshot),
+      policySessions
+        .slice(0, 6)
+        .map((session) => sourceFor("session", session, session.title))
+    );
+  }
+
+  if (
+    /(project developer|project developers|developer|developers|renewable energy company|energy company)/.test(
+      normalized
+    ) &&
+    /(recommend|which|what|attend|session|sessions|useful|relevant|focus|interested)/.test(
+      normalized
+    )
+  ) {
+    const developerSessions = findSessionsByTitleParts(snapshot, [
+      "uganda - european",
+      "productive use energy",
+      "sustainable energy development programme",
+      "clean cooking",
+      "biofuels",
+    ]);
+
+    addPart(
+      answerProjectDeveloperRecommendations(snapshot),
+      developerSessions
+        .slice(0, 8)
+        .map((session) => sourceFor("session", session, session.title))
+    );
+  }
+
+  if (requestedHall && /\b(what|happen|happens|scheduled|schedule|agenda|activity|activities|event|events|in|at)\b/.test(normalized)) {
+    const hallSessions = getHallSessions(snapshot, requestedHall);
+    const hallBlocks = getHallTimeBlocks(snapshot, requestedHall);
+    addPart(
+      answerScheduleByHall(snapshot, requestedHall),
+      [
+        ...hallSessions
+          .slice(0, 8)
+          .map((session) => sourceFor("session", session, session.title)),
+        ...hallBlocks
+          .slice(0, hallSessions.length ? 0 : 6)
+          .map((block) => sourceFor("program_time_block", block, block.label)),
+      ]
+    );
+  }
+
+  if (
+    !requestedHall &&
+    !/\bsessions?\b/.test(normalized) &&
+    (/(which|what|list|show).*\b(halls?|rooms?|spaces?)\b|\b(halls?|rooms?|spaces?)\b.*\b(used|available|venue|venues|list|which|what)\b/.test(
+      normalized
+    ))
+  ) {
+    addPart(
+      answerVenueHalls(snapshot),
+      snapshot.programs.map((program) =>
+        sourceFor("program_overview", program, program.title)
+      )
+    );
+  }
+
+  if (/(exhibition|exhibit|expo block|expo area)/.test(normalized)) {
+    const exhibitionBlocks = snapshot.timeBlocks.filter(
+      (block) => block.type === "EXHIBITION"
+    );
+    addPart(
+      answerTimeBlocksByType(snapshot, "EXHIBITION", "exhibition"),
+      exhibitionBlocks.map((block) =>
+        sourceFor("program_time_block", block, block.label)
+      )
+    );
+  }
+
+  if (/(lunch|meal|tea|break)/.test(normalized)) {
+    const breakFilter = /tea/.test(normalized)
+      ? "tea"
+      : /(lunch|meal)/.test(normalized)
+        ? "lunch"
+        : "all";
+    const matchingBreaks = snapshot.timeBlocks.filter((block) => {
+      if (breakFilter === "tea") {
+        return block.type === "BREAK" && /tea/i.test(block.label || "");
+      }
+      if (breakFilter === "lunch") {
+        return block.type === "LUNCH" || /lunch/i.test(block.label || "");
+      }
+
+      return ["LUNCH", "BREAK"].includes(block.type);
+    });
+
+    addPart(
+      answerFilteredBreaks(snapshot, breakFilter),
+      matchingBreaks
+        .slice(0, 8)
+        .map((block) => sourceFor("program_time_block", block, block.label))
+    );
+  }
+
+  if (/(morning.*evening|morning to evening|full day|all day|most of the day)/.test(normalized)) {
+    const longSessions = snapshot.sessions.filter(
+      (session) => getSessionDurationMinutes(session) >= 420
+    );
+
+    addPart(
+      answerLongRunningSessions(snapshot),
+      longSessions
+        .slice(0, 8)
+        .map((session) => sourceFor("session", session, session.title))
+    );
+  }
+
+  if (
+    requestedDay &&
+    /(what|happen|agenda|schedule|session|program|programme|activity|event|day)/.test(
+      normalized
+    )
+  ) {
+    addPart(
+      answerDaySchedule(requestedDay, snapshot),
+      snapshot.sessions
+        .filter((session) => session.day === requestedDay)
+        .slice(0, 8)
+        .map((session) => sourceFor("session", session, session.title))
+    );
+  }
+
+  if (dayThemeMatch && /\bsessions?\b/.test(normalized)) {
+    addPart(
+      answerSessionsForDayTheme(snapshot, dayThemeMatch),
+      getThemeSources(snapshot, dayThemeMatch)
+    );
+  }
+
+  if (isFilteredSessionQuestion(normalized)) {
+    const topicSessions = findSessionsByTopicQuestion(snapshot, normalized);
+    addPart(
+      answerSessionsByTopic(topicSessions),
+      topicSessions
+        .slice(0, 8)
+        .map((session) => sourceFor("session", session, session.title))
+    );
+  }
+
+  if (/sponsors?/.test(normalized)) {
+    if (/(categor|tiers?|levels?)/.test(normalized)) {
+      addPart(
+        answerSponsorCategories(snapshot),
+        snapshot.sponsorCategories.map((category) =>
+          sourceFor("sponsor_category", category, category.name)
+        )
+      );
+    } else if (/featured/.test(normalized)) {
+      addPart(
+        answerFeaturedSponsors(snapshot),
+        snapshot.sponsors.map((sponsor) =>
+          sourceFor("sponsor", sponsor, sponsor.name)
+        )
+      );
+    } else {
+      addPart(
+        answerSponsors(snapshot),
+        snapshot.sponsors.map((sponsor) =>
+          sourceFor("sponsor", sponsor, sponsor.name)
+        )
+      );
+    }
+  }
+
+  if (/partners?/.test(normalized)) {
+    const categoriesById = getCategoryNameById(snapshot);
+    addPart(
+      answerPartners(snapshot),
+      getActiveSponsors(snapshot)
+        .filter(
+          (sponsor) =>
+            normalizeQuestion(categoriesById.get(sponsor.categoryId)) === "partners"
+        )
+        .map((partner) => sourceFor("sponsor", partner, partner.name))
+    );
+  }
+
+  const uniqueParts = uniqueValues(parts);
+
+  if (uniqueParts.length < 2) return null;
+
+  return {
+    answer: uniqueParts.join("\n\n"),
+    sources: uniqueSources(compoundSources),
+  };
+}
+
 export async function getDirectRecAnswer(question, { signal } = {}) {
   const normalized = normalizeQuestion(question);
 
@@ -1342,6 +1771,11 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   const mentionedSession = findMentionedSession(normalized, snapshot.sessions);
   const requestedHall = findRequestedHall(normalized, snapshot);
   const dayThemeMatch = getDayThemeMatch(normalized, snapshot);
+  const compoundAnswer = getCompoundDirectAnswer(normalized, snapshot, sources);
+
+  if (compoundAnswer) {
+    return compoundAnswer;
+  }
 
   if (mentionedSponsor) {
     return {
@@ -1456,34 +1890,15 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
       normalized
     )
   ) {
-    const rankedSessions = snapshot.sessions
-      .map((session) => ({
-        session,
-        score: scoreSessionForKeywords(session, [
-          "finance",
-          "financier",
-          "financiers",
-          "financial",
-          "investment",
-          "investor",
-          "investors",
-          "capital",
-          "bank",
-          "business",
-          "fund",
-          "funding",
-          "guarantee",
-          "guarantees",
-          "de-risking",
-          "deal",
-        ]),
-      }))
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .map((item) => item.session);
+    const rankedSessions = getRankedFinanceSessions(snapshot).map(
+      (item) => item.session
+    );
+    const oneDayOnly = /\b(only have one day|just one day|single day|one day)\b/.test(
+      normalized
+    );
 
     return {
-      answer: answerFinanceRecommendations(snapshot),
+      answer: answerFinanceRecommendations(snapshot, { oneDayOnly }),
       sources: [
         sourceFor("conference_overview", conference, conference.title),
         ...rankedSessions
@@ -1775,6 +2190,13 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   }
 
   if (/(where|venue|location|held|take place)/.test(normalized)) {
+    if (/\bwhen\b/.test(normalized)) {
+      return {
+        answer: answerConferenceDatesAndVenue(snapshot),
+        sources,
+      };
+    }
+
     return {
       answer: `${conference.title} will take place at ${conference.venue}, ${conference.location}.`,
       sources,
