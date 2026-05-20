@@ -767,6 +767,57 @@ function answerSessionsByHall(snapshot, hall) {
   return `Sessions listed for ${hall}: ${summary}.`;
 }
 
+function getHallSessions(snapshot, hall) {
+  const hallText = normalizeQuestion(hall);
+  const shortHall = hallText.replace(/\s*\(.*?\)\s*/g, "").trim();
+
+  return snapshot.sessions
+    .filter((session) => {
+      const venue = normalizeQuestion(session.venueHall || "");
+      return venue.includes(hallText) || venue.includes(shortHall);
+    })
+    .sort((a, b) => a.day - b.day || new Date(a.startTime) - new Date(b.startTime));
+}
+
+function getHallTimeBlocks(snapshot, hall) {
+  const hallText = normalizeQuestion(hall);
+  const shortHall = hallText.replace(/\s*\(.*?\)\s*/g, "").trim();
+
+  return snapshot.timeBlocks
+    .filter((block) => {
+      const venues = normalizeQuestion((block.venueHalls || []).join(" "));
+      return venues.includes(hallText) || venues.includes(shortHall);
+    })
+    .sort((a, b) => a.day - b.day || (a.startMinutes || 0) - (b.startMinutes || 0));
+}
+
+function answerScheduleByHall(snapshot, hall) {
+  const sessions = getHallSessions(snapshot, hall);
+
+  if (sessions.length > 0) {
+    return answerSessionsByHall(snapshot, hall);
+  }
+
+  const blocks = getHallTimeBlocks(snapshot, hall);
+  if (blocks.length === 0) {
+    return `I could not find scheduled items for ${hall}.`;
+  }
+
+  const summary = blocks
+    .slice(0, 12)
+    .map((block) =>
+      compact([
+        `Day ${block.day}`,
+        `${formatTime(block.startTime)} to ${formatTime(block.endTime)}`,
+        block.label,
+        block.type ? `(${block.type})` : null,
+      ]).join(": ")
+    )
+    .join("; ");
+
+  return `Scheduled items listed for ${hall}: ${summary}.`;
+}
+
 function getDayThemeMatch(normalized, snapshot) {
   const days = getConferenceDays(snapshot.conference);
 
@@ -1080,12 +1131,29 @@ function answerProjectDeveloperRecommendations(snapshot) {
 }
 
 function answerMealBreaks(snapshot) {
+  return answerFilteredBreaks(snapshot);
+}
+
+function answerFilteredBreaks(snapshot, filter = "all") {
   const breaks = snapshot.timeBlocks
-    .filter((block) => ["LUNCH", "BREAK"].includes(block.type))
+    .filter((block) => {
+      if (filter === "tea") {
+        return block.type === "BREAK" && /tea/i.test(block.label || "");
+      }
+      if (filter === "lunch") {
+        return block.type === "LUNCH" || /lunch/i.test(block.label || "");
+      }
+
+      return ["LUNCH", "BREAK"].includes(block.type);
+    })
     .sort((a, b) => a.day - b.day || (a.startMinutes || 0) - (b.startMinutes || 0));
 
   if (breaks.length === 0) {
-    return "I could not find lunch or break information in the conference materials.";
+    return filter === "tea"
+      ? "I could not find tea break information in the conference materials."
+      : filter === "lunch"
+        ? "I could not find lunch information in the conference materials."
+        : "I could not find lunch or break information in the conference materials.";
   }
 
   const summary = breaks
@@ -1098,14 +1166,168 @@ function answerMealBreaks(snapshot) {
     )
     .join("; ");
 
-  return `The programme includes these listed breaks: ${summary}.`;
+  const label =
+    filter === "tea"
+      ? "tea breaks"
+      : filter === "lunch"
+        ? "lunch breaks"
+        : "listed breaks";
+
+  return `The programme includes these ${label}: ${summary}.`;
+}
+
+function answerTimeBlocksByType(snapshot, type, label) {
+  const blocks = snapshot.timeBlocks
+    .filter((block) => normalizeQuestion(block.type) === normalizeQuestion(type))
+    .sort((a, b) => a.day - b.day || (a.startMinutes || 0) - (b.startMinutes || 0));
+
+  if (blocks.length === 0) {
+    return `I could not find ${label} blocks in the published programme.`;
+  }
+
+  const summary = blocks
+    .map((block) =>
+      compact([
+        `Day ${block.day}`,
+        `${formatTime(block.startTime)} to ${formatTime(block.endTime)}`,
+        block.venueHalls?.length ? block.venueHalls.join(", ") : null,
+      ]).join(": ")
+    )
+    .join("; ");
+
+  return `Yes. The listed ${label} blocks are: ${summary}.`;
+}
+
+function getSessionDurationMinutes(session) {
+  if (!session.startTime || !session.toTime) return 0;
+
+  return Math.round(
+    (new Date(session.toTime).getTime() - new Date(session.startTime).getTime()) /
+      60000
+  );
+}
+
+function answerLongRunningSessions(snapshot) {
+  const sessions = snapshot.sessions
+    .filter((session) => getSessionDurationMinutes(session) >= 420)
+    .sort((a, b) => a.day - b.day || new Date(a.startTime) - new Date(b.startTime));
+
+  if (sessions.length === 0) {
+    return "I could not find sessions that run for most of the day in the published programme.";
+  }
+
+  const summary = sessions
+    .map((session) =>
+      compact([
+        session.title,
+        `Day ${session.day}`,
+        session.venueHall,
+        `${formatTime(session.startTime)} to ${formatTime(session.toTime)}`,
+      ]).join(", ")
+    )
+    .join("; ");
+
+  return `The sessions that run for most of the day are: ${summary}.`;
+}
+
+function getCategoryNameById(snapshot) {
+  return new Map(
+    snapshot.sponsorCategories.map((category) => [category.$id, category.name])
+  );
+}
+
+function getActiveSponsors(snapshot) {
+  return snapshot.sponsors
+    .filter((sponsor) => sponsor.isActive !== false)
+    .sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0));
+}
+
+function answerSponsorCategories(snapshot) {
+  const categories = snapshot.sponsorCategories
+    .filter((category) => category.isActive !== false)
+    .sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0));
+
+  if (categories.length === 0) {
+    return "No active sponsor categories are currently listed.";
+  }
+
+  return `The active sponsor categories are: ${categories.map((category) => category.name).join(", ")}.`;
+}
+
+function answerPartners(snapshot) {
+  const categoriesById = getCategoryNameById(snapshot);
+  const partners = getActiveSponsors(snapshot).filter(
+    (sponsor) => normalizeQuestion(categoriesById.get(sponsor.categoryId)) === "partners"
+  );
+
+  if (partners.length === 0) {
+    return "No active partners are currently listed for the conference.";
+  }
+
+  return `The listed partners are: ${partners
+    .map((partner) =>
+      partner.siteUrl ? `${partner.name} (${partner.siteUrl})` : partner.name
+    )
+    .join(", ")}.`;
+}
+
+function answerFeaturedSponsors(snapshot) {
+  const categoriesById = getCategoryNameById(snapshot);
+  const featured = getActiveSponsors(snapshot).filter(
+    (sponsor) => sponsor.isFeatured === true
+  );
+
+  if (featured.length === 0) {
+    return "No sponsors are currently marked as featured in the published conference data.";
+  }
+
+  return `The featured sponsors are: ${featured
+    .map((sponsor) => {
+      const category = categoriesById.get(sponsor.categoryId);
+      return category ? `${sponsor.name} (${category})` : sponsor.name;
+    })
+    .join(", ")}.`;
+}
+
+function answerBeginnerGuidance(snapshot) {
+  const days = getConferenceDays(snapshot.conference);
+  const dayText = days
+    .map((day, index) => {
+      const dayNumber = getDayNumberFromDay(day, index);
+      return `Day ${dayNumber}: ${day.theme}`;
+    })
+    .join("; ");
+
+  return [
+    "If you are new to renewable energy, I would use the conference structure as your guide.",
+    `Start with the daily focus areas: ${dayText}.`,
+    "Day 1 gives the policy and investment foundation, Day 2 introduces technology and innovation, Day 3 moves into implementation and sustainability, and Day 4 focuses on impact, scale, and regional leadership.",
+  ].join(" ");
+}
+
+function answerDayThemeAttendance(snapshot, day) {
+  const days = getConferenceDays(snapshot.conference);
+  const dayIndex = days.indexOf(day);
+  const dayNumber = getDayNumberFromDay(day, dayIndex);
+  const sessions = snapshot.sessions
+    .filter((session) => session.day === dayNumber)
+    .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+  if (sessions.length === 0) {
+    return `For ${day.theme}, I would focus on Day ${dayNumber}, but I could not find listed sessions for that day.`;
+  }
+
+  return [
+    `If you care about ${day.theme}, focus on Day ${dayNumber}.`,
+    `Relevant listed sessions are: ${formatRecommendedSessions(sessions)}.`,
+  ].join(" ");
 }
 
 export async function getDirectRecAnswer(question, { signal } = {}) {
   const normalized = normalizeQuestion(question);
 
   if (
-    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|focus|sponsor|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer)/.test(
+    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|focus|sponsor|partner|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|exhibition|exhibit|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer|renewable|energy|beginner|new|implementation|sustainability)/.test(
       normalized
     )
   ) {
@@ -1180,6 +1402,29 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   }
 
   if (
+    requestedHall &&
+    /\b(what|happen|happens|scheduled|schedule|agenda|activity|activities|event|events|in|at)\b/.test(
+      normalized
+    )
+  ) {
+    const hallSessions = getHallSessions(snapshot, requestedHall);
+    const hallBlocks = getHallTimeBlocks(snapshot, requestedHall);
+
+    return {
+      answer: answerScheduleByHall(snapshot, requestedHall),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...hallSessions
+          .slice(0, 8)
+          .map((session) => sourceFor("session", session, session.title)),
+        ...hallBlocks
+          .slice(0, hallSessions.length ? 0 : 6)
+          .map((block) => sourceFor("program_time_block", block, block.label)),
+      ],
+    };
+  }
+
+  if (
     !/\bsessions?\b/.test(normalized) &&
     (/(which|what|list|show).*\b(halls?|rooms?|spaces?)\b|\b(halls?|rooms?|spaces?)\b.*\b(used|available|venue|venues|list|which|what)\b/.test(
       normalized
@@ -1193,6 +1438,13 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
           sourceFor("program_overview", program, program.title)
         ),
       ],
+    };
+  }
+
+  if (/\b(new|beginner|first time|newcomer)\b/.test(normalized)) {
+    return {
+      answer: answerBeginnerGuidance(snapshot),
+      sources,
     };
   }
 
@@ -1236,6 +1488,27 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
         sourceFor("conference_overview", conference, conference.title),
         ...rankedSessions
           .slice(0, 6)
+          .map((session) => sourceFor("session", session, session.title)),
+      ],
+    };
+  }
+
+  if (
+    dayThemeMatch &&
+    /(attend|care|interested|focus|should|recommend|guide|what should)/.test(
+      normalized
+    )
+  ) {
+    const days = getConferenceDays(conference);
+    const dayNumber = getDayNumberFromDay(dayThemeMatch, days.indexOf(dayThemeMatch));
+
+    return {
+      answer: answerDayThemeAttendance(snapshot, dayThemeMatch),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...snapshot.sessions
+          .filter((session) => session.day === dayNumber)
+          .slice(0, 8)
           .map((session) => sourceFor("session", session, session.title)),
       ],
     };
@@ -1341,13 +1614,44 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     };
   }
 
-  if (/(lunch|meal|tea|break)/.test(normalized)) {
+  if (/(exhibition|exhibit|expo block|expo area)/.test(normalized)) {
+    const exhibitionBlocks = snapshot.timeBlocks.filter(
+      (block) => block.type === "EXHIBITION"
+    );
+
     return {
-      answer: answerMealBreaks(snapshot),
+      answer: answerTimeBlocksByType(snapshot, "EXHIBITION", "exhibition"),
       sources: [
         sourceFor("conference_overview", conference, conference.title),
-        ...snapshot.timeBlocks
-          .filter((block) => ["LUNCH", "BREAK"].includes(block.type))
+        ...exhibitionBlocks.map((block) =>
+          sourceFor("program_time_block", block, block.label)
+        ),
+      ],
+    };
+  }
+
+  if (/(lunch|meal|tea|break)/.test(normalized)) {
+    const breakFilter = /tea/.test(normalized)
+      ? "tea"
+      : /(lunch|meal)/.test(normalized)
+        ? "lunch"
+        : "all";
+    const matchingBreaks = snapshot.timeBlocks.filter((block) => {
+      if (breakFilter === "tea") {
+        return block.type === "BREAK" && /tea/i.test(block.label || "");
+      }
+      if (breakFilter === "lunch") {
+        return block.type === "LUNCH" || /lunch/i.test(block.label || "");
+      }
+
+      return ["LUNCH", "BREAK"].includes(block.type);
+    });
+
+    return {
+      answer: answerFilteredBreaks(snapshot, breakFilter),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...matchingBreaks
           .slice(0, 8)
           .map((block) => sourceFor("program_time_block", block, block.label)),
       ],
@@ -1363,6 +1667,22 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     return {
       answer: answerDaysCount(snapshot),
       sources,
+    };
+  }
+
+  if (/(morning.*evening|morning to evening|full day|all day|most of the day)/.test(normalized)) {
+    const longSessions = snapshot.sessions.filter(
+      (session) => getSessionDurationMinutes(session) >= 420
+    );
+
+    return {
+      answer: answerLongRunningSessions(snapshot),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...longSessions
+          .slice(0, 8)
+          .map((session) => sourceFor("session", session, session.title)),
+      ],
     };
   }
 
@@ -1509,6 +1829,30 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   }
 
   if (/sponsor/.test(normalized)) {
+    if (/(categor|tiers?|levels?)/.test(normalized)) {
+      return {
+        answer: answerSponsorCategories(snapshot),
+        sources: [
+          ...sources,
+          ...snapshot.sponsorCategories.map((category) =>
+            sourceFor("sponsor_category", category, category.name)
+          ),
+        ],
+      };
+    }
+
+    if (/featured/.test(normalized)) {
+      return {
+        answer: answerFeaturedSponsors(snapshot),
+        sources: [
+          ...sources,
+          ...snapshot.sponsors.map((sponsor) =>
+            sourceFor("sponsor", sponsor, sponsor.name)
+          ),
+        ],
+      };
+    }
+
     return {
       answer: answerSponsors(snapshot),
       sources: [
@@ -1516,6 +1860,21 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
         ...snapshot.sponsors.map((sponsor) =>
           sourceFor("sponsor", sponsor, sponsor.name)
         ),
+      ],
+    };
+  }
+
+  if (/partners?/.test(normalized)) {
+    const categoriesById = getCategoryNameById(snapshot);
+    const partners = getActiveSponsors(snapshot).filter(
+      (sponsor) => normalizeQuestion(categoriesById.get(sponsor.categoryId)) === "partners"
+    );
+
+    return {
+      answer: answerPartners(snapshot),
+      sources: [
+        ...sources,
+        ...partners.map((partner) => sourceFor("sponsor", partner, partner.name)),
       ],
     };
   }
