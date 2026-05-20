@@ -1185,6 +1185,61 @@ function answerProjectDeveloperRecommendations(snapshot) {
   ].join(" ");
 }
 
+const TOPIC_RECOMMENDATION_PROFILES = [
+  {
+    label: "cooking technologies",
+    pattern:
+      /\b(clean cooking|cooking technolog(?:y|ies)|solar[- ]electric cooking|solco|cookstoves?|cooking solutions?)\b/,
+    titleParts: ["clean cooking", "solco", "solar-electric cooking"],
+    rationale:
+      "These are the published sessions most directly connected to clean cooking and solar-electric cooking technologies.",
+  },
+  {
+    label: "productive use energy",
+    pattern: /\b(productive use|productive use energy|productive energy)\b/,
+    titleParts: ["productive use energy"],
+    rationale:
+      "This is the published session directly focused on productive use energy.",
+  },
+  {
+    label: "biofuels",
+    pattern: /\b(biofuel|biofuels)\b/,
+    titleParts: ["biofuels"],
+    rationale: "This is the published session directly focused on biofuels.",
+  },
+  {
+    label: "nuclear and geothermal",
+    pattern: /\b(nuclear|geothermal)\b/,
+    titleParts: ["nuclear", "geothermal"],
+    rationale:
+      "This is the published session directly focused on nuclear and geothermal energy.",
+  },
+  {
+    label: "energy efficiency",
+    pattern: /\b(energy efficiency|efficiency)\b/,
+    titleParts: ["energy efficiency"],
+    rationale:
+      "This is the published session directly connected to energy efficiency.",
+  },
+];
+
+function getTopicRecommendationMatches(snapshot, normalized) {
+  return TOPIC_RECOMMENDATION_PROFILES
+    .filter((profile) => profile.pattern.test(normalized))
+    .map((profile) => ({
+      profile,
+      sessions: findSessionsByTitleParts(snapshot, profile.titleParts),
+    }))
+    .filter((match) => match.sessions.length > 0);
+}
+
+function answerTopicRecommendation(match) {
+  return [
+    `For ${match.profile.label}, I would prioritize: ${formatRecommendedSessions(match.sessions)}.`,
+    match.profile.rationale,
+  ].join(" ");
+}
+
 function answerMealBreaks(snapshot) {
   return answerFilteredBreaks(snapshot);
 }
@@ -1591,6 +1646,15 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     );
   }
 
+  for (const topicMatch of getTopicRecommendationMatches(snapshot, normalized)) {
+    addPart(
+      answerTopicRecommendation(topicMatch),
+      topicMatch.sessions
+        .slice(0, 6)
+        .map((session) => sourceFor("session", session, session.title))
+    );
+  }
+
   if (requestedHall && /\b(what|happen|happens|scheduled|schedule|agenda|activity|activities|event|events|in|at)\b/.test(normalized)) {
     const hallSessions = getHallSessions(snapshot, requestedHall);
     const hallBlocks = getHallTimeBlocks(snapshot, requestedHall);
@@ -1756,7 +1820,7 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   const normalized = normalizeQuestion(question);
 
   if (
-    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|focus|sponsor|partner|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|exhibition|exhibit|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer|renewable|energy|beginner|new|implementation|sustainability)/.test(
+    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|focus|sponsor|partner|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|exhibition|exhibit|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer|renewable|energy|beginner|new|implementation|sustainability|cooking|cookstove|solco|biofuel|geothermal|nuclear|productive use|efficiency)/.test(
       normalized
     )
   ) {
@@ -1996,6 +2060,32 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
           .filter((session) => session.theme && !/^tbc$/i.test(session.theme))
           .slice(0, 8)
           .map((session) => sourceFor("session", session, session.title)),
+      ],
+    };
+  }
+
+  const topicRecommendationMatches = getTopicRecommendationMatches(
+    snapshot,
+    normalized
+  );
+
+  if (
+    topicRecommendationMatches.length > 0 &&
+    /(recommend|which|what|attend|session|sessions|useful|relevant|focus|interested|guide)/.test(
+      normalized
+    )
+  ) {
+    return {
+      answer: topicRecommendationMatches
+        .map((match) => answerTopicRecommendation(match))
+        .join(" "),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...topicRecommendationMatches.flatMap((match) =>
+          match.sessions
+            .slice(0, 6)
+            .map((session) => sourceFor("session", session, session.title))
+        ),
       ],
     };
   }
