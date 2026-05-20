@@ -3,11 +3,12 @@
 A Next.js conference assistant that answers questions from local conference documents using:
 
 - Next.js App Router for the web UI and `/api/chat` route
+- Appwrite TablesDB as the source of truth for REC & EXPO data
 - Ollama for local embeddings and chat completion
-- Qdrant for vector search over conference materials
+- Qdrant as a derived vector index over public Appwrite conference data
 - PM2 for self-hosted production deployment
 
-The current chat route streams responses to the browser, keeps Ollama models warm, limits prompt size, and caches repeated answers in memory.
+The current chat route streams responses to the browser, answers exact public conference facts directly from Appwrite, can use a planner model to select REC tables before the answer model responds, keeps Ollama models warm, limits prompt size, and caches repeated answers in memory.
 
 ## Requirements
 
@@ -36,7 +37,22 @@ Key variables:
 
 ```bash
 OLLAMA_URL=http://localhost:11434
+
+APPWRITE_ENDPOINT=https://appwrite.nrep.ug/v1
+APPWRITE_PROJECT_ID=66bcc8450005201fa1af
+APPWRITE_API_KEY=
+APPWRITE_DATABASE_ID=66bcc8760033a24883f6
+APPWRITE_REC_CONFERENCES_TABLE_ID=6863ae070028061694f1
+APPWRITE_REC_PROGRAM_TABLE_ID=68e62391001de7d5c9be
+APPWRITE_REC_PROGRAM_TIME_BLOCKS_TABLE_ID=rec_program_time_blocks
+APPWRITE_REC_SESSIONS_TABLE_ID=68e60fc1003b0bbb05d8
+APPWRITE_REC_SPONSOR_CATEGORIES_TABLE_ID=rec_sponsor_categories
+APPWRITE_REC_SPONSORS_TABLE_ID=rec_sponsors
+APPWRITE_TIMEOUT_MS=30000
+REC_DATA_CACHE_TTL_MS=300000
+
 CHAT_MODEL=gemma2:2b
+PLANNER_MODEL=gemma2:2b
 EMBED_MODEL=nomic-embed-text
 
 QDRANT_URL=http://localhost:6333
@@ -49,14 +65,27 @@ EMBED_KEEP_ALIVE=30m
 CHAT_NUM_CTX=1024
 CHAT_NUM_PREDICT=160
 CHAT_NUM_THREAD=12
+PLANNER_ENABLED=true
+PLANNER_KEEP_ALIVE=30m
+PLANNER_NUM_CTX=2048
+PLANNER_NUM_PREDICT=220
+PLANNER_TEMPERATURE=0
+PLANNER_NUM_THREAD=12
+PLANNER_MAX_OPERATIONS=4
+PLANNER_MAX_ROWS_PER_OPERATION=12
+PLANNER_MAX_CONTEXT_CHARS=3200
+PLANNER_SCHEMA_MAX_CHARS=2200
 
 RAG_SEARCH_LIMIT=1
 RAG_MAX_CONTEXT_CHARS=1600
 ANSWER_CACHE_TTL_MS=300000
 ANSWER_CACHE_MAX=100
+CHAT_DIAGNOSTIC_LOGS=false
 ```
 
 `.env.local` is the single source of runtime environment values. The PM2 ecosystem file reads it directly and passes those values to the app.
+
+Keep `APPWRITE_API_KEY` server-only. It is used by ingestion and API routes, and it must never be exposed with a `NEXT_PUBLIC_` prefix.
 
 ## Local Setup
 
@@ -94,19 +123,61 @@ Open `http://localhost:3000`.
 
 ## Conference Data
 
-Source files live in:
+The source of truth is the `HR` Appwrite database:
 
-```text
-data/conference/
-```
+- `REC_Conferences`
+- `REC_Program`
+- `REC_ProgramTimeBlocks`
+- `REC_Sessions`
+- `REC_SponsorCategories`
+- `REC_Sponsors`
 
-The ingestion script reads Markdown files from this folder, chunks them, embeds them with Ollama, recreates the Qdrant collection, and upserts the vectors.
+The chatbot intentionally does not ingest private registration/security tables such as `REC_Registrations`, `REC_Reg_Coupon`, `REC Registration Locks`, or `REC Registration Verifications`.
 
-After changing conference content, run:
+The ingestion script reads public REC data from Appwrite, converts it into clean text documents, embeds those documents with Ollama, recreates the Qdrant collection, and upserts the vectors.
+
+After changing public conference content in Appwrite, run:
 
 ```bash
 npm run ingest
 ```
+
+The chat route uses this order:
+
+1. Scope guard for greetings and off-topic questions.
+2. Direct Appwrite answers for deterministic facts such as venue, dates, registration status, contact details, capacity, fees, website, sponsors, and common programme questions.
+3. Planner lookup for richer cross-table questions. The human-readable schema lives in `docs/conference-schema.md`; the runtime planner receives a compact schema prompt from `src/lib/rec-schema.js`, returns a strict JSON plan, and `src/lib/rec-planner.js` validates the requested tables, fields, filters, sorting, and limits before retrieving public REC26 data.
+4. Qdrant semantic search as a fallback.
+5. The answer model responds only from the retrieved context.
+
+The machine-readable schema allowlist lives in `src/lib/rec-schema.js`. Update both that file and `docs/conference-schema.md` when the public REC table structure changes.
+
+## Planner Diagnostics
+
+Set this on the VPS while testing:
+
+```bash
+CHAT_DIAGNOSTIC_LOGS=true
+```
+
+The app writes one-line JSON diagnostic events to stdout, which PM2 captures. Useful events include:
+
+- `request_start`
+- `answer_direct_appwrite`
+- `planner_executed`
+- `planner_invalid_or_empty`
+- `answer_planner_context`
+- `answer_qdrant_context`
+- `answer_out_of_scope_or_low_rag_score`
+- `request_error`
+
+To share a recent sample after testing on PM2:
+
+```bash
+pm2 logs rec-expo-chatbot --lines 200 --nostream
+```
+
+The diagnostic logs intentionally omit environment secrets and trim long values, but they can include the user's question and planner keywords. Turn `CHAT_DIAGNOSTIC_LOGS=false` after testing if you do not want prompt-level logs in production.
 
 ## Useful Scripts
 
@@ -145,7 +216,9 @@ For the target VPS with 14 CPU cores and 16 GB RAM, the recommended default is:
 
 ```bash
 CHAT_MODEL=gemma2:2b
+PLANNER_MODEL=gemma2:2b
 CHAT_NUM_THREAD=12
+PLANNER_NUM_THREAD=12
 RAG_SEARCH_LIMIT=1
 RAG_MAX_CONTEXT_CHARS=1600
 ```
@@ -188,6 +261,7 @@ location /api/chat {
 If answers are slow:
 
 - confirm `CHAT_MODEL=gemma2:2b`
+- confirm `PLANNER_MODEL` is pulled if it differs from `CHAT_MODEL`
 - confirm the model is already pulled with `ollama list`
 - keep `CHAT_KEEP_ALIVE=30m` or higher
 - reduce `CHAT_NUM_PREDICT` for shorter answers
@@ -195,10 +269,11 @@ If answers are slow:
 
 If ingestion fails:
 
+- confirm `APPWRITE_API_KEY` is set in `.env.local`
+- confirm the Appwrite key can read the public REC tables
 - confirm Qdrant is running at `QDRANT_URL`
 - confirm Ollama is running at `OLLAMA_URL`
 - confirm `EMBED_MODEL` exists in `ollama list`
-- check that Markdown files exist in `data/conference/`
 
 If PM2 fails to start:
 
