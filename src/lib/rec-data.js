@@ -708,14 +708,206 @@ function answerSessionsOverview(snapshot, requestedDay) {
   return `${prefix} ${daySummaries}.`;
 }
 
+function getVenueHalls(snapshot) {
+  return uniqueValues([
+    ...snapshot.programs.flatMap((program) => program.venueHalls || []),
+    ...snapshot.timeBlocks.flatMap((block) => block.venueHalls || []),
+    ...snapshot.sessions.map((session) => session.venueHall),
+  ]);
+}
+
+function answerVenueHalls(snapshot) {
+  const halls = getVenueHalls(snapshot);
+
+  if (halls.length === 0) {
+    return "I could not find specific hall details in the published conference materials.";
+  }
+
+  return `The listed conference spaces are: ${halls.join(", ")}.`;
+}
+
+function findRequestedHall(normalized, snapshot) {
+  const halls = getVenueHalls(snapshot).sort((a, b) => b.length - a.length);
+
+  return halls.find((hall) => {
+    const hallText = normalizeQuestion(hall);
+    const shortHall = hallText.replace(/\s*\(.*?\)\s*/g, "").trim();
+
+    return (
+      normalized.includes(hallText) ||
+      (shortHall.length >= 4 && normalized.includes(shortHall))
+    );
+  });
+}
+
+function answerSessionsByHall(snapshot, hall) {
+  const hallText = normalizeQuestion(hall);
+  const shortHall = hallText.replace(/\s*\(.*?\)\s*/g, "").trim();
+  const sessions = snapshot.sessions
+    .filter((session) => {
+      const venue = normalizeQuestion(session.venueHall || "");
+      return venue.includes(hallText) || venue.includes(shortHall);
+    })
+    .sort((a, b) => a.day - b.day || new Date(a.startTime) - new Date(b.startTime));
+
+  if (sessions.length === 0) {
+    return `I could not find listed sessions in ${hall}.`;
+  }
+
+  const summary = sessions
+    .map((session) =>
+      compact([
+        `Day ${session.day}`,
+        `${formatTime(session.startTime)} to ${formatTime(session.toTime)}`,
+        session.title,
+      ]).join(": ")
+    )
+    .join("; ");
+
+  return `Sessions listed for ${hall}: ${summary}.`;
+}
+
+function getDayThemeMatch(normalized, snapshot) {
+  const days = getConferenceDays(snapshot.conference);
+
+  return days.find((day) => {
+    const tokens = normalizeQuestion(day.theme || "")
+      .split(/\W+/)
+      .filter((token) => token.length > 3);
+    const matchedTokens = tokens.filter((token) =>
+      new RegExp(`\\b${token}\\b`).test(normalized)
+    );
+
+    return matchedTokens.length >= Math.min(2, tokens.length);
+  });
+}
+
+function getDayNumberFromDay(day, index) {
+  return Number(day?.label?.match(/Day\s+(\d+)/i)?.[1]) || index + 1;
+}
+
+function answerSessionsForDayTheme(snapshot, day) {
+  const days = getConferenceDays(snapshot.conference);
+  const dayIndex = days.indexOf(day);
+  const dayNumber = getDayNumberFromDay(day, dayIndex);
+  const sessions = snapshot.sessions
+    .filter((session) => session.day === dayNumber)
+    .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+  if (sessions.length === 0) {
+    return `Day ${dayNumber} focuses on ${day.theme}, but I could not find listed sessions for that day.`;
+  }
+
+  const summary = sessions
+    .map((session) =>
+      compact([
+        session.title,
+        session.venueHall ? `at ${session.venueHall}` : null,
+        session.startTime && session.toTime
+          ? `(${formatTime(session.startTime)} to ${formatTime(session.toTime)})`
+          : null,
+      ]).join(" ")
+    )
+    .join("; ");
+
+  return `That topic maps to Day ${dayNumber}: ${day.theme}. Listed sessions for that day are: ${summary}.`;
+}
+
+function getTopicTokens(normalized) {
+  const stopwords = new Set([
+    "what",
+    "which",
+    "show",
+    "tell",
+    "sessions",
+    "session",
+    "connected",
+    "related",
+    "relevant",
+    "about",
+    "mention",
+    "mentions",
+    "happening",
+    "useful",
+    "likely",
+    "would",
+    "should",
+    "attend",
+    "conference",
+    "rec",
+    "expo",
+    "the",
+    "and",
+    "are",
+    "for",
+    "with",
+    "under",
+    "from",
+    "into",
+    "that",
+    "this",
+  ]);
+
+  return normalized
+    .split(/\W+/)
+    .filter((token) => token.length > 3 && !stopwords.has(token));
+}
+
+function findSessionsByTopicQuestion(snapshot, normalized) {
+  const tokens = getTopicTokens(normalized);
+  if (tokens.length === 0) return [];
+
+  return snapshot.sessions
+    .map((session) => {
+      const text = normalizeQuestion(
+        `${session.title || ""} ${session.theme || ""} ${stripHtml(session.preamble || "")} ${session.organizer || ""}`
+      );
+      const score = tokens.filter((token) =>
+        new RegExp(`\\b${token}\\b`).test(text)
+      ).length;
+
+      return { session, score };
+    })
+    .filter((item) => item.score >= Math.min(2, tokens.length))
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        a.session.day - b.session.day ||
+        new Date(a.session.startTime) - new Date(b.session.startTime)
+    )
+    .map((item) => item.session);
+}
+
+function answerSessionsByTopic(sessions) {
+  if (sessions.length === 0) {
+    return null;
+  }
+
+  const summary = sessions
+    .map((session) =>
+      compact([
+        session.title,
+        `Day ${session.day}`,
+        session.venueHall,
+        session.startTime && session.toTime
+          ? `${formatTime(session.startTime)} to ${formatTime(session.toTime)}`
+          : null,
+        session.theme ? `Theme: ${session.theme}` : null,
+      ]).join(", ")
+    )
+    .join("; ");
+
+  return `Matching published sessions: ${summary}.`;
+}
+
 function isFilteredSessionQuestion(normalized) {
   if (!/\bsessions?\b/.test(normalized)) return false;
 
   return (
-    /\bsessions?\b.*\b(about|related|connected|relevant|involving|mention|mentions|cover|covering|focused|focus|for|under)\b/.test(
+    /\bsessions?\b.*\b(about|related|connected|relevant|involving|mention|mentions|cover|covering|focused|focus|for|under|in|at)\b/.test(
       normalized
     ) ||
-    /\b(about|related|connected|relevant|involving|mention|mentions|cover|covering|focused|focus|for|under)\b.*\bsessions?\b/.test(
+    /\b(about|related|connected|relevant|involving|mention|mentions|cover|covering|focused|focus|for|under|in|at)\b.*\bsessions?\b/.test(
       normalized
     )
   );
@@ -823,6 +1015,70 @@ function answerFinanceRecommendations(snapshot) {
   return `For someone in finance, I would prioritize these published REC26 & EXPO sessions: ${recommendations}`;
 }
 
+function findSessionsByTitleParts(snapshot, titleParts) {
+  return snapshot.sessions
+    .filter((session) => {
+      const title = normalizeQuestion(session.title || "");
+      return titleParts.some((part) => title.includes(part));
+    })
+    .sort((a, b) => a.day - b.day || new Date(a.startTime) - new Date(b.startTime));
+}
+
+function formatRecommendedSessions(sessions) {
+  return sessions
+    .map((session) =>
+      compact([
+        session.title,
+        `Day ${session.day}`,
+        session.venueHall,
+        session.startTime && session.toTime
+          ? `${formatTime(session.startTime)} to ${formatTime(session.toTime)}`
+          : null,
+      ]).join(", ")
+    )
+    .join("; ");
+}
+
+function answerPolicyRecommendations(snapshot) {
+  const sessions = findSessionsByTitleParts(snapshot, [
+    "sustainable energy development programme",
+    "subregional forum",
+    "world resource institute",
+    "united nations",
+    "uganda - european",
+  ]);
+
+  if (sessions.length === 0) {
+    return "I could not find policy-focused sessions in the published programme.";
+  }
+
+  return [
+    "For policymakers or government participants, I would start with Day 1 because its focus is Renewable Energy Policy & Investment.",
+    `Relevant published sessions include: ${formatRecommendedSessions(sessions.slice(0, 5))}.`,
+    "I would also consider the Uganda - European (EU) Business Forum because it connects policy dialogue with investment partnerships and green industrialisation.",
+  ].join(" ");
+}
+
+function answerProjectDeveloperRecommendations(snapshot) {
+  const sessions = findSessionsByTitleParts(snapshot, [
+    "uganda - european",
+    "productive use energy",
+    "sustainable energy development programme",
+    "clean cooking",
+    "biofuels",
+  ]);
+
+  if (sessions.length === 0) {
+    return "I could not find project-development-focused sessions in the published programme.";
+  }
+
+  return [
+    "For project developers, I would prioritize sessions that connect project pipelines, investment, implementation, and productive use.",
+    `Relevant published sessions include: ${formatRecommendedSessions(sessions.slice(0, 6))}.`,
+    "The Uganda - European (EU) Business Forum is especially relevant because it explicitly covers investors, developers, partnerships, B2B meetings, deal-making, and de-risking.",
+  ].join(" ");
+}
+
 function answerMealBreaks(snapshot) {
   const breaks = snapshot.timeBlocks
     .filter((block) => ["LUNCH", "BREAK"].includes(block.type))
@@ -849,7 +1105,7 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   const normalized = normalizeQuestion(question);
 
   if (
-    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|sponsor|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|finance|financial|investment|investor|capital|bank|funding)/.test(
+    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|focus|sponsor|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer)/.test(
       normalized
     )
   ) {
@@ -862,6 +1118,8 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   const mentionedSponsor = findMentionedSponsor(normalized, snapshot.sponsors);
   const requestedDay = extractRequestedDay(normalized);
   const mentionedSession = findMentionedSession(normalized, snapshot.sessions);
+  const requestedHall = findRequestedHall(normalized, snapshot);
+  const dayThemeMatch = getDayThemeMatch(normalized, snapshot);
 
   if (mentionedSponsor) {
     return {
@@ -891,6 +1149,50 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     return {
       answer: answerDailyThemes(snapshot),
       sources,
+    };
+  }
+
+  if (/theme/.test(normalized) && !/\bsessions?\b/.test(normalized)) {
+    return {
+      answer: `The theme for ${conference.title} is "${conference.theme}".`,
+      sources,
+    };
+  }
+
+  if (/(contact|phone|email)/.test(normalized)) {
+    return {
+      answer:
+        compact([
+          conference.contactPhone ? `Phone: ${conference.contactPhone}` : null,
+          conference.contactEmail ? `Email: ${conference.contactEmail}` : null,
+        ]).join(". ") || "No public contact information is currently listed.",
+      sources,
+    };
+  }
+
+  if (/(website|site|link|url)/.test(normalized)) {
+    return {
+      answer: conference.mainWebsiteUrl
+        ? `The conference website is ${conference.mainWebsiteUrl}.`
+        : "No public website is currently listed.",
+      sources,
+    };
+  }
+
+  if (
+    !/\bsessions?\b/.test(normalized) &&
+    (/(which|what|list|show).*\b(halls?|rooms?|spaces?)\b|\b(halls?|rooms?|spaces?)\b.*\b(used|available|venue|venues|list|which|what)\b/.test(
+      normalized
+    ))
+  ) {
+    return {
+      answer: answerVenueHalls(snapshot),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...snapshot.programs.map((program) =>
+          sourceFor("program_overview", program, program.title)
+        ),
+      ],
     };
   }
 
@@ -940,6 +1242,60 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   }
 
   if (
+    /(policy ?makers?|policymakers?|government|regulator|regulators|ministry|public sector)/.test(
+      normalized
+    ) &&
+    /(recommend|which|what|attend|session|sessions|useful|relevant|focus|interested)/.test(
+      normalized
+    )
+  ) {
+    const policySessions = findSessionsByTitleParts(snapshot, [
+      "sustainable energy development programme",
+      "subregional forum",
+      "world resource institute",
+      "united nations",
+      "uganda - european",
+    ]);
+
+    return {
+      answer: answerPolicyRecommendations(snapshot),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...policySessions
+          .slice(0, 6)
+          .map((session) => sourceFor("session", session, session.title)),
+      ],
+    };
+  }
+
+  if (
+    /(project developer|project developers|developer|developers|renewable energy company|energy company)/.test(
+      normalized
+    ) &&
+    /(recommend|which|what|attend|session|sessions|useful|relevant|focus|interested)/.test(
+      normalized
+    )
+  ) {
+    const developerSessions = findSessionsByTitleParts(snapshot, [
+      "uganda - european",
+      "productive use energy",
+      "sustainable energy development programme",
+      "clean cooking",
+      "biofuels",
+    ]);
+
+    return {
+      answer: answerProjectDeveloperRecommendations(snapshot),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...developerSessions
+          .slice(0, 8)
+          .map((session) => sourceFor("session", session, session.title)),
+      ],
+    };
+  }
+
+  if (
     /(learn|learning|take away|takeaway|gain|expect|benefit|course of)/.test(
       normalized
     )
@@ -953,17 +1309,6 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
           .slice(0, 8)
           .map((session) => sourceFor("session", session, session.title)),
       ],
-    };
-  }
-
-  if (
-    /(tell me more|overview|summary|summarise|summarize|about|describe|introduce|what is).*(conference|rec|expo)|\b(conference|rec26|rec|expo)\s+overview\b/.test(
-      normalized
-    )
-  ) {
-    return {
-      answer: answerConferenceOverview(snapshot),
-      sources,
     };
   }
 
@@ -982,6 +1327,17 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
           sourceFor("program_overview", program, program.title)
         ),
       ],
+    };
+  }
+
+  if (
+    /(tell me more|overview|summary|summarise|summarize|about|describe|introduce|what is).*(conference|rec|expo)|\b(conference|rec26|rec|expo)\s+overview\b/.test(
+      normalized
+    )
+  ) {
+    return {
+      answer: answerConferenceOverview(snapshot),
+      sources,
     };
   }
 
@@ -1028,6 +1384,58 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     };
   }
 
+  if (requestedHall && /\bsessions?\b/.test(normalized)) {
+    const hallSessions = snapshot.sessions.filter((session) => {
+      const venue = normalizeQuestion(session.venueHall || "");
+      const hall = normalizeQuestion(requestedHall);
+      const shortHall = hall.replace(/\s*\(.*?\)\s*/g, "").trim();
+      return venue.includes(hall) || venue.includes(shortHall);
+    });
+
+    return {
+      answer: answerSessionsByHall(snapshot, requestedHall),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...hallSessions
+          .slice(0, 8)
+          .map((session) => sourceFor("session", session, session.title)),
+      ],
+    };
+  }
+
+  if (dayThemeMatch && /\bsessions?\b/.test(normalized)) {
+    const days = getConferenceDays(conference);
+    const dayNumber = getDayNumberFromDay(dayThemeMatch, days.indexOf(dayThemeMatch));
+
+    return {
+      answer: answerSessionsForDayTheme(snapshot, dayThemeMatch),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...snapshot.sessions
+          .filter((session) => session.day === dayNumber)
+          .slice(0, 8)
+          .map((session) => sourceFor("session", session, session.title)),
+      ],
+    };
+  }
+
+  if (isFilteredSessionQuestion(normalized)) {
+    const topicSessions = findSessionsByTopicQuestion(snapshot, normalized);
+    const topicAnswer = answerSessionsByTopic(topicSessions);
+
+    if (topicAnswer) {
+      return {
+        answer: topicAnswer,
+        sources: [
+          sourceFor("conference_overview", conference, conference.title),
+          ...topicSessions
+            .slice(0, 8)
+            .map((session) => sourceFor("session", session, session.title)),
+        ],
+      };
+    }
+  }
+
   if (
     /(are there|any|list|what|which|show|tell me).*\bsessions?\b/.test(
       normalized
@@ -1065,7 +1473,7 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     return {
       answer: hasDeadlineQuestion
         ? `${withTerminalPeriod(status)} I could not find a registration deadline in the published conference materials.`
-        : status,
+        : withTerminalPeriod(status),
       sources,
     };
   }
@@ -1078,13 +1486,6 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
 
     return {
       answer: `${conference.title} runs from ${formatConferenceDates(conference)}. ${dayText}`,
-      sources,
-    };
-  }
-
-  if (/theme/.test(normalized)) {
-    return {
-      answer: `The theme for ${conference.title} is "${conference.theme}".`,
       sources,
     };
   }
@@ -1116,25 +1517,6 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
           sourceFor("sponsor", sponsor, sponsor.name)
         ),
       ],
-    };
-  }
-
-  if (/(contact|phone|email)/.test(normalized)) {
-    return {
-      answer: compact([
-        conference.contactPhone ? `Phone: ${conference.contactPhone}` : null,
-        conference.contactEmail ? `Email: ${conference.contactEmail}` : null,
-      ]).join(". ") || "No public contact information is currently listed.",
-      sources,
-    };
-  }
-
-  if (/(website|site|link|url)/.test(normalized)) {
-    return {
-      answer: conference.mainWebsiteUrl
-        ? `The conference website is ${conference.mainWebsiteUrl}.`
-        : "No public website is currently listed.",
-      sources,
     };
   }
 
