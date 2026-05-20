@@ -13,6 +13,26 @@ const MAX_CONTEXT_CHARS = readInteger("RAG_MAX_CONTEXT_CHARS", 1600);
 const MIN_SEARCH_SCORE = readFloat("RAG_MIN_SEARCH_SCORE", 0.52);
 const ANSWER_CACHE_TTL_MS = readInteger("ANSWER_CACHE_TTL_MS", 5 * 60 * 1000);
 const ANSWER_CACHE_MAX = readInteger("ANSWER_CACHE_MAX", 100);
+const QDRANT_COMPLEMENT_ENABLED = readBoolean("QDRANT_COMPLEMENT_ENABLED", false);
+const QDRANT_COMPLEMENT_MODE = (process.env.QDRANT_COMPLEMENT_MODE || "append")
+  .trim()
+  .toLowerCase();
+const QDRANT_COMPLEMENT_SEARCH_LIMIT = readInteger(
+  "QDRANT_COMPLEMENT_SEARCH_LIMIT",
+  3
+);
+const QDRANT_COMPLEMENT_MAX_CONTEXT_CHARS = readInteger(
+  "QDRANT_COMPLEMENT_MAX_CONTEXT_CHARS",
+  2400
+);
+const QDRANT_COMPLEMENT_MIN_SCORE = readFloat(
+  "QDRANT_COMPLEMENT_MIN_SCORE",
+  MIN_SEARCH_SCORE
+);
+const QDRANT_COMPLEMENT_SNIPPET_CHARS = readInteger(
+  "QDRANT_COMPLEMENT_SNIPPET_CHARS",
+  700
+);
 const answerCache = new Map();
 const CHATBOT_HELP_ANSWER =
   "I can help with public information about the Renewable Energy Conference & Expo, including dates, venue, registration status, programme sessions, themes, halls, sponsors, contacts, and website links. I can only answer from the conference materials I have access to, so I will say when something is not listed.";
@@ -35,6 +55,12 @@ function readInteger(name, fallback) {
 function readFloat(name, fallback) {
   const value = Number.parseFloat(process.env[name] || "");
   return Number.isFinite(value) ? value : fallback;
+}
+
+function readBoolean(name, fallback) {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  return /^(1|true|yes|on)$/i.test(value);
 }
 
 function normalizeQuestion(question) {
@@ -148,8 +174,8 @@ function summarizeQuestion(question) {
   return question.slice(0, 240);
 }
 
-function formatContext(searchResults) {
-  let remaining = MAX_CONTEXT_CHARS;
+function formatContext(searchResults, maxContextChars = MAX_CONTEXT_CHARS) {
+  let remaining = maxContextChars;
   const chunks = [];
 
   for (const result of searchResults) {
@@ -176,19 +202,22 @@ function formatSources(searchResults) {
   }));
 }
 
-async function retrieveContext(question, signal) {
+async function retrieveContext(question, signal, options = {}) {
   const queryVector = await getEmbedding(`search_query: ${question}`, {
     signal,
   });
+  const limit = options.limit || SEARCH_LIMIT;
+  const minScore = options.minScore ?? MIN_SEARCH_SCORE;
+  const maxContextChars = options.maxContextChars || MAX_CONTEXT_CHARS;
 
   const searchResults = await qdrant.search(QDRANT_COLLECTION, {
     vector: queryVector,
-    limit: SEARCH_LIMIT,
+    limit,
     with_payload: true,
   });
   const topScore = searchResults[0]?.score || 0;
 
-  if (topScore < MIN_SEARCH_SCORE) {
+  if (topScore < minScore) {
     return {
       context: "",
       sources: [],
@@ -198,11 +227,138 @@ async function retrieveContext(question, signal) {
   }
 
   return {
-    context: formatContext(searchResults),
+    context: formatContext(searchResults, maxContextChars),
     sources: formatSources(searchResults),
     confident: true,
     topScore,
   };
+}
+
+function sourceKey(source) {
+  return `${source?.sourceType || ""}:${source?.rowId || source?.source || ""}`;
+}
+
+function mergeSources(...sourceGroups) {
+  const seen = new Set();
+  const merged = [];
+
+  for (const source of sourceGroups.flat()) {
+    if (!source) continue;
+    const key = sourceKey(source);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(source);
+  }
+
+  return merged;
+}
+
+function shouldComplementDirectAnswer(question) {
+  if (!QDRANT_COMPLEMENT_ENABLED) return false;
+
+  const normalized = normalizeQuestion(question);
+
+  return (
+    /\b(in depth|in-depth|deep dive|detailed|comprehensive|full view|complete view|overview|summary)\b/.test(
+      normalized
+    ) ||
+    /\btell me more\b/.test(normalized) ||
+    /\bmore about\b/.test(normalized) ||
+    (/\bsessions?\b/.test(normalized) &&
+      /\b(more|overview|summary|details|about)\b/.test(normalized)) ||
+    /\b(what.*learn|expect.*learn|various renewable energy technolog|technology areas)\b/.test(
+      normalized
+    )
+  );
+}
+
+function buildComplementContext(directAnswer, qdrantContext) {
+  return [
+    "AUTHORITATIVE APPWRITE ANSWER:",
+    directAnswer.answer,
+    "",
+    "SUPPLEMENTAL INDEXED CONFERENCE CONTEXT:",
+    qdrantContext,
+    "",
+    "Use the authoritative Appwrite answer as the base. Use supplemental context only to add relevant detail. Do not contradict the authoritative answer.",
+  ].join("\n");
+}
+
+function truncateComplementSnippet(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+
+  if (clean.length <= QDRANT_COMPLEMENT_SNIPPET_CHARS) {
+    return clean;
+  }
+
+  return `${clean.slice(0, QDRANT_COMPLEMENT_SNIPPET_CHARS).trim()}...`;
+}
+
+function appendComplementContext(directAnswer, qdrantContext) {
+  const snippets = qdrantContext
+    .split(/\n{2,}/)
+    .map(truncateComplementSnippet)
+    .filter(Boolean)
+    .filter((snippet) => !directAnswer.answer.includes(snippet))
+    .slice(0, 2);
+
+  if (snippets.length === 0) {
+    return directAnswer.answer;
+  }
+
+  return `${directAnswer.answer}\n\nAdditional indexed context: ${snippets.join(" ")}`;
+}
+
+async function complementDirectAnswer(question, directAnswer, signal, requestId, startedAt) {
+  if (!shouldComplementDirectAnswer(question)) {
+    return null;
+  }
+
+  try {
+    const retrieved = await retrieveContext(question, signal, {
+      limit: QDRANT_COMPLEMENT_SEARCH_LIMIT,
+      maxContextChars: QDRANT_COMPLEMENT_MAX_CONTEXT_CHARS,
+      minScore: QDRANT_COMPLEMENT_MIN_SCORE,
+    });
+
+    if (!retrieved.confident || !retrieved.context) {
+      return null;
+    }
+
+    const useModel = QDRANT_COMPLEMENT_MODE === "model";
+    const answerStartedAt = Date.now();
+    const answer = useModel
+      ? await askMistral({
+          question,
+          context: buildComplementContext(directAnswer, retrieved.context),
+          signal,
+        })
+      : appendComplementContext(directAnswer, retrieved.context);
+
+    const payload = {
+      answer: answer || directAnswer.answer,
+      sources: mergeSources(directAnswer.sources, retrieved.sources),
+    };
+
+    logChatEvent("answer_direct_qdrant_complement", {
+      requestId,
+      durationMs: Date.now() - startedAt,
+      answerModelMs: useModel ? Date.now() - answerStartedAt : 0,
+      mode: useModel ? "model" : "append",
+      directSourceCount: directAnswer.sources?.length || 0,
+      qdrantSourceCount: retrieved.sources.length,
+      contextChars: retrieved.context.length,
+    });
+
+    return payload;
+  } catch (error) {
+    logChatEvent("answer_direct_qdrant_complement_fallback", {
+      requestId,
+      durationMs: Date.now() - startedAt,
+      error: error.message,
+    });
+    return null;
+  }
 }
 
 async function answerQuestion(question, signal, requestId) {
@@ -231,13 +387,23 @@ async function answerQuestion(question, signal, requestId) {
   const directAnswer = await getDirectRecAnswer(question, { signal });
 
   if (directAnswer) {
-    setCachedAnswer(question, directAnswer);
+    const complementedAnswer = await complementDirectAnswer(
+      question,
+      directAnswer,
+      signal,
+      requestId,
+      startedAt
+    );
+    const payload = complementedAnswer || directAnswer;
+
+    setCachedAnswer(question, payload);
     logChatEvent("answer_direct_appwrite", {
       requestId,
       durationMs: Date.now() - startedAt,
-      sourceCount: directAnswer.sources?.length || 0,
+      sourceCount: payload.sources?.length || 0,
+      complemented: Boolean(complementedAnswer),
     });
-    return directAnswer;
+    return payload;
   }
 
   const plannedContext = await retrievePlannedRecContext(question, {
@@ -347,14 +513,24 @@ function streamAnswer(question, signal, requestId) {
           const directAnswer = await getDirectRecAnswer(question, { signal });
 
           if (directAnswer) {
-            setCachedAnswer(question, directAnswer);
-            writeEvent(controller, encoder, "sources", directAnswer.sources);
-            writeEvent(controller, encoder, "token", directAnswer.answer);
+            const complementedAnswer = await complementDirectAnswer(
+              question,
+              directAnswer,
+              signal,
+              requestId,
+              startedAt
+            );
+            const payload = complementedAnswer || directAnswer;
+
+            setCachedAnswer(question, payload);
+            writeEvent(controller, encoder, "sources", payload.sources);
+            writeEvent(controller, encoder, "token", payload.answer);
             writeEvent(controller, encoder, "done", { cached: false });
             logChatEvent("stream_direct_appwrite", {
               requestId,
               durationMs: Date.now() - startedAt,
-              sourceCount: directAnswer.sources?.length || 0,
+              sourceCount: payload.sources?.length || 0,
+              complemented: Boolean(complementedAnswer),
             });
             controller.close();
             return;

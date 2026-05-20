@@ -521,6 +521,21 @@ function getConferenceDays(conference) {
   return parseJson(conference.days, []);
 }
 
+function getDayInfo(snapshot, dayNumber) {
+  const days = getConferenceDays(snapshot.conference);
+  return days.find((day, index) => getDayNumberFromDay(day, index) === dayNumber);
+}
+
+function answerDayDate(snapshot, dayNumber) {
+  const day = getDayInfo(snapshot, dayNumber);
+
+  if (!day) {
+    return `I could not find date information for Day ${dayNumber} in the published conference materials.`;
+  }
+
+  return `Day ${dayNumber} of ${snapshot.conference.shortName || snapshot.conference.title} is ${day.date}${day.theme ? `, with the focus area "${day.theme}"` : ""}.`;
+}
+
 function answerDaysCount(snapshot) {
   const days = getConferenceDays(snapshot.conference);
   const dayCount = days.length;
@@ -619,6 +634,41 @@ function answerConferenceOverview(snapshot) {
     snapshot.conference.mainWebsiteUrl
       ? `Website: ${snapshot.conference.mainWebsiteUrl}.`
       : null,
+  ]).join(" ");
+}
+
+function answerConferenceDeepDive(snapshot) {
+  const days = getConferenceDays(snapshot.conference);
+  const dayThemes = days
+    .map((day, index) => {
+      const dayNumber = getDayNumberFromDay(day, index);
+      return `Day ${dayNumber} (${day.date}): ${day.theme}`;
+    })
+    .join("; ");
+  const halls = getVenueHalls(snapshot).slice(0, 8);
+  const technologyAreas = getTechnologyDiscussionAreas(snapshot)
+    .map((area) => area.label)
+    .slice(0, 10);
+  const sponsors = getActiveSponsors(snapshot)
+    .slice(0, 6)
+    .map((sponsor) => sponsor.name);
+  const registrationStatus = snapshot.conference.registrationOpen
+    ? "Registration is currently open."
+    : snapshot.conference.regClosedMessage || "Registration is currently closed.";
+
+  return compact([
+    `${snapshot.conference.title} (${snapshot.conference.shortName}) is the active REC conference for ${snapshot.conference.year}.`,
+    `It runs from ${formatConferenceDates(snapshot.conference)} at ${snapshot.conference.venue}, ${snapshot.conference.location}.`,
+    `Theme: "${snapshot.conference.theme}".`,
+    dayThemes ? `Daily focus areas: ${dayThemes}.` : null,
+    `The published programme currently has ${snapshot.sessions.length} listed sessions and ${snapshot.timeBlocks.length} time blocks, including sessions, exhibitions, breaks, lunch, and ceremonies.`,
+    halls.length ? `Main spaces include ${halls.join(", ")}.` : null,
+    technologyAreas.length
+      ? `Technology and sector areas appearing in the programme include ${technologyAreas.join(", ")}.`
+      : null,
+    sponsors.length ? `Listed sponsors and partners include ${sponsors.join(", ")}.` : null,
+    withTerminalPeriod(registrationStatus),
+    snapshot.conference.mainWebsiteUrl ? `Website: ${snapshot.conference.mainWebsiteUrl}.` : null,
   ]).join(" ");
 }
 
@@ -1001,6 +1051,7 @@ function answerSessionsByTopic(sessions) {
 
 function isFilteredSessionQuestion(normalized) {
   if (!/\bsessions?\b/.test(normalized)) return false;
+  if (isGenericSessionsOverviewQuestion(normalized)) return false;
 
   return (
     /\bsessions?\b.*\b(about|related|connected|relevant|involving|mention|mentions|cover|covering|focused|focus|for|under|in|at)\b/.test(
@@ -1009,6 +1060,54 @@ function isFilteredSessionQuestion(normalized) {
     /\b(about|related|connected|relevant|involving|mention|mentions|cover|covering|focused|focus|for|under|in|at)\b.*\bsessions?\b/.test(
       normalized
     )
+  );
+}
+
+function isGenericSessionsOverviewQuestion(normalized) {
+  return (
+    /\b(tell me more|more|overview|summary|summarise|summarize|in depth|in-depth|detailed|details|view)\b.*\bsessions?\b/.test(
+      normalized
+    ) ||
+    /\bsessions?\b.*\b(overview|summary|summarise|summarize|in depth|in-depth|detailed|details|view)\b/.test(
+      normalized
+    )
+  );
+}
+
+function isConferenceDeepDiveQuestion(normalized) {
+  return (
+    /\b(in depth|in-depth|deep dive|detailed|comprehensive|full|complete)\b.*\b(view|overview|summary|description|look|about)?\b.*\b(conference|rec|expo)\b/.test(
+      normalized
+    ) ||
+    /\b(conference|rec|expo)\b.*\b(in depth|in-depth|deep dive|detailed|comprehensive|full|complete)\b/.test(
+      normalized
+    )
+  );
+}
+
+function isConferenceOverviewQuestion(normalized) {
+  return (
+    isConferenceDeepDiveQuestion(normalized) ||
+    /\btell me more\b/.test(normalized) ||
+    /(overview|summary|summarise|summarize|about|describe|introduce|what is).*(conference|rec|expo)\b/.test(
+      normalized
+    ) ||
+    /\b(conference|rec26|rec|expo)\s+overview\b/.test(normalized)
+  );
+}
+
+function isDayDateQuestion(normalized) {
+  return (
+    /\b(on )?which date\b/.test(normalized) ||
+    /\bwhat date\b/.test(normalized) ||
+    /\bdate is day\b/.test(normalized) ||
+    /\bday\s*\d+\b.*\bdate\b/.test(normalized)
+  );
+}
+
+function isDayScheduleQuestion(normalized) {
+  return /\b(what happens|happen|agenda|schedule|program|programme|activity|activities|events?|day schedule)\b/.test(
+    normalized
   );
 }
 
@@ -1679,12 +1778,7 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     ) ||
     (/\b(program|programme|agenda)\b/.test(normalized) &&
       /(overview|summary|more|about|tell|give|what)/.test(normalized));
-  const wantsConferenceOverview =
-    /\btell me more\b/.test(normalized) ||
-    /(overview|summary|summarise|summarize|about|describe|introduce|what is).*(conference|rec|expo)\b/.test(
-      normalized
-    ) ||
-    /\b(conference|rec26|rec|expo)\s+overview\b/.test(normalized);
+  const wantsConferenceOverview = isConferenceOverviewQuestion(normalized);
 
   function addPart(answer, partSources = []) {
     if (!answer) return;
@@ -1702,7 +1796,22 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
   }
 
   if (wantsConferenceOverview && !wantsProgramOverview) {
-    addPart(answerConferenceOverview(snapshot), sources);
+    addPart(
+      isConferenceDeepDiveQuestion(normalized)
+        ? answerConferenceDeepDive(snapshot)
+        : answerConferenceOverview(snapshot),
+      sources
+    );
+  }
+
+  if (isGenericSessionsOverviewQuestion(normalized)) {
+    addPart(
+      answerSessionsOverview(snapshot, requestedDay),
+      snapshot.sessions
+        .filter((session) => !requestedDay || session.day === requestedDay)
+        .slice(0, 8)
+        .map((session) => sourceFor("session", session, session.title))
+    );
   }
 
   if (asksTechnologyAreas) {
@@ -1989,12 +2098,11 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     );
   }
 
-  if (
-    requestedDay &&
-    /(what|happen|agenda|schedule|session|program|programme|activity|event|day)/.test(
-      normalized
-    )
-  ) {
+  if (requestedDay && isDayDateQuestion(normalized)) {
+    addPart(answerDayDate(snapshot, requestedDay), sources);
+  }
+
+  if (requestedDay && isDayScheduleQuestion(normalized)) {
     addPart(
       answerDaySchedule(requestedDay, snapshot),
       snapshot.sessions
@@ -2011,7 +2119,7 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     );
   }
 
-  if (isFilteredSessionQuestion(normalized)) {
+  if (!wantsTopicRecommendation && isFilteredSessionQuestion(normalized)) {
     const topicSessions = findSessionsByTopicQuestion(snapshot, normalized);
     addPart(
       answerSessionsByTopic(topicSessions),
@@ -2092,6 +2200,19 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
 
   if (compoundAnswer) {
     return compoundAnswer;
+  }
+
+  if (isGenericSessionsOverviewQuestion(normalized)) {
+    return {
+      answer: answerSessionsOverview(snapshot, requestedDay),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...snapshot.sessions
+          .filter((session) => !requestedDay || session.day === requestedDay)
+          .slice(0, 8)
+          .map((session) => sourceFor("session", session, session.title)),
+      ],
+    };
   }
 
   const asksTechnologyAreas = isTechnologyAreasQuestion(normalized);
@@ -2412,13 +2533,11 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     };
   }
 
-  if (
-    /(tell me more|overview|summary|summarise|summarize|about|describe|introduce|what is).*(conference|rec|expo)|\b(conference|rec26|rec|expo)\s+overview\b/.test(
-      normalized
-    )
-  ) {
+  if (isConferenceOverviewQuestion(normalized)) {
     return {
-      answer: answerConferenceOverview(snapshot),
+      answer: isConferenceDeepDiveQuestion(normalized)
+        ? answerConferenceDeepDive(snapshot)
+        : answerConferenceOverview(snapshot),
       sources,
     };
   }
@@ -2495,12 +2614,14 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     };
   }
 
-  if (
-    requestedDay &&
-    /(what|happen|agenda|schedule|session|program|programme|activity|event|day)/.test(
-      normalized
-    )
-  ) {
+  if (requestedDay && isDayDateQuestion(normalized)) {
+    return {
+      answer: answerDayDate(snapshot, requestedDay),
+      sources,
+    };
+  }
+
+  if (requestedDay && isDayScheduleQuestion(normalized)) {
     return {
       answer: answerDaySchedule(requestedDay, snapshot),
       sources: [

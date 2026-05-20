@@ -78,6 +78,13 @@ PLANNER_SCHEMA_MAX_CHARS=2200
 
 RAG_SEARCH_LIMIT=1
 RAG_MAX_CONTEXT_CHARS=1600
+RAG_MIN_SEARCH_SCORE=0.52
+QDRANT_COMPLEMENT_ENABLED=false
+QDRANT_COMPLEMENT_MODE=append
+QDRANT_COMPLEMENT_SEARCH_LIMIT=3
+QDRANT_COMPLEMENT_MAX_CONTEXT_CHARS=2400
+QDRANT_COMPLEMENT_MIN_SCORE=0.52
+QDRANT_COMPLEMENT_SNIPPET_CHARS=700
 ANSWER_CACHE_TTL_MS=300000
 ANSWER_CACHE_MAX=100
 CHAT_DIAGNOSTIC_LOGS=false
@@ -146,9 +153,10 @@ The chat route uses this order:
 
 1. Scope guard for greetings and off-topic questions.
 2. Direct Appwrite answers for deterministic facts such as venue, dates, registration status, contact details, capacity, fees, website, sponsors, and common programme questions.
-3. Planner lookup for richer cross-table questions. The human-readable schema lives in `docs/conference-schema.md`; the runtime planner receives a compact schema prompt from `src/lib/rec-schema.js`, returns a strict JSON plan, and `src/lib/rec-planner.js` validates the requested tables, fields, filters, sorting, and limits before retrieving public REC26 data.
-4. Qdrant semantic search as a fallback.
-5. The answer model responds only from the retrieved context.
+3. Optional Qdrant complement for broad direct answers such as detailed overviews, session summaries, learning questions, and technology-area questions. Appwrite still provides the authoritative answer; Qdrant only adds indexed supporting context. Set `QDRANT_COMPLEMENT_ENABLED=true` to enable it. The default `QDRANT_COMPLEMENT_MODE=append` avoids a second chat-model call; use `model` only if you want the model to rewrite the direct answer with Qdrant context.
+4. Planner lookup for richer cross-table questions. The human-readable schema lives in `docs/conference-schema.md`; the runtime planner receives a compact schema prompt from `src/lib/rec-schema.js`, returns a strict JSON plan, and `src/lib/rec-planner.js` validates the requested tables, fields, filters, sorting, and limits before retrieving public REC26 data.
+5. Qdrant semantic search as a fallback.
+6. The answer model responds only from the retrieved context.
 
 The machine-readable schema allowlist lives in `src/lib/rec-schema.js`. Update both that file and `docs/conference-schema.md` when the public REC table structure changes.
 
