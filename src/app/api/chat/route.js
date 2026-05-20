@@ -19,7 +19,7 @@ const CHATBOT_HELP_ANSWER =
 const OUT_OF_SCOPE_ANSWER =
   "I’m here to help with the Renewable Energy Conference & Expo. Ask me about the venue, dates, registration, programme sessions, themes, halls, sponsors, contacts, or website links.";
 const CONFERENCE_TERMS =
-  /\b(conference|rec|expo|serena|venue|location|register|registration|programme|program|agenda|schedule|session|day|theme|speaker|sponsor|exhibitor|hall|room|contact|website|fee|cost|price|capacity|limit|lunch|meal|tea|break|business forum|giz|fcdo|european union|clean cooking|cooking technolog(?:y|ies)|solar[- ]electric cooking|solco|biofuel|biofuels|geothermal|nuclear|productive use|energy efficiency)\b/;
+  /\b(conference|rec|expo|serena|venue|location|register|registration|programme|program|agenda|schedule|session|day|theme|speaker|sponsor|exhibitor|hall|room|contact|website|fee|cost|price|capacity|limit|lunch|meal|tea|break|business forum|giz|fcdo|european union|technology|technologies|technical|ceremony|opening|closing|start|starts|starting|clean cooking|cooking technolog(?:y|ies)|solar[- ]electric cooking|solco|biofuel|biofuels|geothermal|nuclear|productive use|energy efficiency)\b/;
 const OFF_TOPIC_TERMS =
   /\b(joke|jazz|entertain|sing|song|poem|story|weather|news|sports|football|recipe|code|python|javascript|homework|essay|translate|summarize this|crypto|stock|president|politics|hotel|hotels)\b/;
 const GENERAL_KNOWLEDGE_START =
