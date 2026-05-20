@@ -22,6 +22,7 @@ Install the expected Ollama models:
 
 ```bash
 ollama pull gemma2:2b
+ollama pull command-r
 ollama pull nomic-embed-text
 ```
 
@@ -50,6 +51,9 @@ APPWRITE_REC_SPONSOR_CATEGORIES_TABLE_ID=rec_sponsor_categories
 APPWRITE_REC_SPONSORS_TABLE_ID=rec_sponsors
 APPWRITE_TIMEOUT_MS=30000
 REC_DATA_CACHE_TTL_MS=300000
+REC_SNAPSHOT_ENABLED=true
+REC_SNAPSHOT_STRICT=false
+REC_REFRESH_TOKEN=
 
 CHAT_MODEL=gemma2:2b
 PLANNER_MODEL=gemma2:2b
@@ -117,6 +121,7 @@ ollama serve
 Ingest the conference documents:
 
 ```bash
+npm run export:rec
 npm run ingest
 ```
 
@@ -141,13 +146,46 @@ The source of truth is the `HR` Appwrite database:
 
 The chatbot intentionally does not ingest private registration/security tables such as `REC_Registrations`, `REC_Reg_Coupon`, `REC Registration Locks`, or `REC Registration Verifications`.
 
-The ingestion script reads public REC data from Appwrite, converts it into clean text documents, embeds those documents with Ollama, recreates the Qdrant collection, and upserts the vectors.
+The active public conference data is exported into generated local snapshot files:
+
+- `data/generated/rec-current.json` is the machine-readable runtime snapshot.
+- `data/generated/rec-current.md` is a human-readable generated context file for inspection and LLM/vector context.
+
+These files are generated artifacts and are ignored by git. Appwrite remains the source of truth.
+
+At runtime, the chatbot reads `rec-current.json` first when `REC_SNAPSHOT_ENABLED=true`. If the file is missing or invalid, it falls back to Appwrite unless `REC_SNAPSHOT_STRICT=true`.
+
+The ingestion script reads the same runtime snapshot, converts it into clean text documents, embeds those documents with Ollama, recreates the Qdrant collection, and upserts the vectors.
 
 After changing public conference content in Appwrite, run:
 
 ```bash
+npm run export:rec
 npm run ingest
 ```
+
+Or run both:
+
+```bash
+npm run refresh:rec
+```
+
+If you need to bypass the generated snapshot for one ingest run, set:
+
+```bash
+INGEST_FORCE_APPWRITE=true npm run ingest
+```
+
+The VPS can refresh the generated files through the protected API:
+
+```bash
+curl -X POST "https://your-domain.example/api/admin/rec-data/refresh" \
+  -H "Authorization: Bearer $REC_REFRESH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"rebuildQdrant":false}'
+```
+
+Set `"rebuildQdrant":true` only when you also want the API call to rebuild the vector collection. That can take longer because it calls the embedding model for every generated document.
 
 The chat route uses this order:
 
@@ -195,7 +233,9 @@ npm run build    # Build the production app
 npm run start    # Start the production app after building
 npm run lint     # Run ESLint
 npm test         # Runs lint
+npm run export:rec # Export active Appwrite REC data to data/generated/
 npm run ingest   # Rebuild the Qdrant vector collection
+npm run refresh:rec # Export active REC data, then rebuild Qdrant
 ```
 
 ## Production Deployment
@@ -223,15 +263,17 @@ The PM2 config:
 For the target VPS with 14 CPU cores and 16 GB RAM, the recommended default is:
 
 ```bash
-CHAT_MODEL=gemma2:2b
-PLANNER_MODEL=gemma2:2b
+CHAT_MODEL=command-r
+PLANNER_MODEL=command-r
 CHAT_NUM_THREAD=12
 PLANNER_NUM_THREAD=12
 RAG_SEARCH_LIMIT=1
 RAG_MAX_CONTEXT_CHARS=1600
+QDRANT_COMPLEMENT_ENABLED=true
+QDRANT_COMPLEMENT_MODE=append
 ```
 
-This keeps responses fast for the current conference QA workload while leaving CPU headroom for Next.js, Qdrant, and the operating system.
+For faster but smaller local models, `gemma2:2b` or `qwen2.5:3b` are still usable. With `command-r`, keep broad Qdrant complement in `append` mode unless you intentionally want a second model pass with `QDRANT_COMPLEMENT_MODE=model`.
 
 ## Reverse Proxy Notes
 
@@ -279,9 +321,15 @@ If ingestion fails:
 
 - confirm `APPWRITE_API_KEY` is set in `.env.local`
 - confirm the Appwrite key can read the public REC tables
+- run `npm run export:rec` and inspect `data/generated/rec-current.json`
 - confirm Qdrant is running at `QDRANT_URL`
 - confirm Ollama is running at `OLLAMA_URL`
 - confirm `EMBED_MODEL` exists in `ollama list`
+
+If the refresh API returns `401`:
+
+- confirm `REC_REFRESH_TOKEN` is set in `.env.local`
+- pass it as `Authorization: Bearer <token>` or `x-rec-refresh-token`
 
 If PM2 fails to start:
 

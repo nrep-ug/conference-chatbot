@@ -44,6 +44,10 @@ next-env.d.ts
 # Qdrant local data
 qdrant_storage/
 
+# generated REC snapshot cache
+data/generated/*
+!data/generated/.gitkeep
+
 # logs
 logs/
 *.log*

@@ -9,7 +9,9 @@
     "start": "next start",
     "test": "npm run lint",
     "lint": "eslint",
-    "ingest": "node --env-file=.env.local scripts/ingest.js"
+    "export:rec": "node --env-file=.env.local scripts/export-rec-snapshot.js",
+    "ingest": "node --env-file=.env.local scripts/ingest.js",
+    "refresh:rec": "npm run export:rec && npm run ingest"
   },
   "dependencies": {
     "@qdrant/js-client-rest": "^1.18.0",

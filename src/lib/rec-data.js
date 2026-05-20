@@ -1,24 +1,24 @@
-import { Query, listAllRows, listRows } from "./appwrite.js";
+import {
+  HR_DATABASE_ID,
+  fetchRecSnapshotFromAppwrite,
+  readGeneratedRecSnapshot,
+  snapshotToRuntimeData,
+} from "./rec-snapshot.js";
 
-const HR_DATABASE_ID = process.env.APPWRITE_DATABASE_ID || "66bcc8760033a24883f6";
-const REC_TABLES = {
-  conferences: process.env.APPWRITE_REC_CONFERENCES_TABLE_ID || "6863ae070028061694f1",
-  programs: process.env.APPWRITE_REC_PROGRAM_TABLE_ID || "68e62391001de7d5c9be",
-  timeBlocks:
-    process.env.APPWRITE_REC_PROGRAM_TIME_BLOCKS_TABLE_ID ||
-    "rec_program_time_blocks",
-  sessions: process.env.APPWRITE_REC_SESSIONS_TABLE_ID || "68e60fc1003b0bbb05d8",
-  sponsorCategories:
-    process.env.APPWRITE_REC_SPONSOR_CATEGORIES_TABLE_ID ||
-    "rec_sponsor_categories",
-  sponsors: process.env.APPWRITE_REC_SPONSORS_TABLE_ID || "rec_sponsors",
-};
 const REC_DATA_CACHE_TTL_MS = readInteger("REC_DATA_CACHE_TTL_MS", 5 * 60 * 1000);
+const REC_SNAPSHOT_ENABLED = readBoolean("REC_SNAPSHOT_ENABLED", true);
+const REC_SNAPSHOT_STRICT = readBoolean("REC_SNAPSHOT_STRICT", false);
 let cachedSnapshot = null;
 
 function readInteger(name, fallback) {
   const value = Number.parseInt(process.env[name] || "", 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function readBoolean(name, fallback) {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  return /^(1|true|yes|on)$/i.test(value);
 }
 
 function parseJson(value, fallback) {
@@ -120,75 +120,27 @@ function setCache(data) {
   };
 }
 
-async function getActiveConference(signal) {
-  const query = Query();
-  const result = await listRows(HR_DATABASE_ID, REC_TABLES.conferences, {
-    signal,
-    queries: [query.equal("isActive", true), query.limit(1)],
-  });
-
-  if (!result.rows[0]) {
-    throw new Error("No active REC conference found in Appwrite.");
-  }
-
-  return result.rows[0];
-}
-
-async function listRowsByField(tableId, field, value, signal) {
-  const query = Query();
-
-  return listAllRows(HR_DATABASE_ID, tableId, {
-    signal,
-    queries: [query.equal(field, value)],
-  });
-}
-
-async function listRowsByProgramIds(tableId, programIds, signal) {
-  const rows = [];
-
-  for (const programId of programIds) {
-    rows.push(...(await listRowsByField(tableId, "programId", programId, signal)));
-  }
-
-  return rows;
-}
-
 export async function getRecPublicSnapshot({ signal, forceRefresh = false } = {}) {
   if (!forceRefresh) {
     const cached = getCache();
     if (cached) return cached;
   }
 
-  const conference = await getActiveConference(signal);
-  const conferenceId = conference.$id;
-  const programs = await listRowsByField(
-    REC_TABLES.programs,
-    "conferenceId",
-    conferenceId,
-    signal
-  );
-  const programIds = programs.map((program) => program.$id);
-  const [timeBlocks, sessions, sponsorCategories, sponsors] =
-    await Promise.all([
-      listRowsByProgramIds(REC_TABLES.timeBlocks, programIds, signal),
-      listRowsByProgramIds(REC_TABLES.sessions, programIds, signal),
-      listRowsByField(
-        REC_TABLES.sponsorCategories,
-        "conferenceId",
-        conferenceId,
-        signal
-      ),
-      listRowsByField(REC_TABLES.sponsors, "conferenceId", conferenceId, signal),
-    ]);
+  if (!forceRefresh && REC_SNAPSHOT_ENABLED) {
+    try {
+      const generated = snapshotToRuntimeData(await readGeneratedRecSnapshot());
+      setCache(generated);
+      return generated;
+    } catch (error) {
+      if (REC_SNAPSHOT_STRICT) {
+        throw error;
+      }
+    }
+  }
 
-  const data = {
-    conference,
-    programs,
-    timeBlocks,
-    sessions,
-    sponsorCategories,
-    sponsors,
-  };
+  const data = snapshotToRuntimeData(
+    await fetchRecSnapshotFromAppwrite({ signal })
+  );
 
   setCache(data);
   return data;
