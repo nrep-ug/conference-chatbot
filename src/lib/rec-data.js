@@ -1722,6 +1722,37 @@ function getDayPreparationAdvice(dayTheme) {
   return "prepare questions tied to this day's published focus area";
 }
 
+function getPreparationLogisticsAdvice(snapshot) {
+  const sessionStart = snapshot.timeBlocks
+    .filter((block) => block.type === "SESSION")
+    .sort((a, b) => (a.startMinutes || 0) - (b.startMinutes || 0))[0];
+  const teaBreak = snapshot.timeBlocks
+    .filter((block) => block.type === "BREAK" && /tea/i.test(block.label || ""))
+    .sort((a, b) => (a.startMinutes || 0) - (b.startMinutes || 0))[0];
+  const lunchBreak = snapshot.timeBlocks
+    .filter((block) => block.type === "LUNCH" || /lunch/i.test(block.label || ""))
+    .sort((a, b) => (a.startMinutes || 0) - (b.startMinutes || 0))[0];
+  const logistics = compact([
+    sessionStart?.startTime
+      ? `morning sessions start around ${formatTime(sessionStart.startTime)}`
+      : null,
+    teaBreak?.startTime
+      ? `the first listed refreshment break is Tea Break at ${formatTime(
+          teaBreak.startTime
+        )}`
+      : null,
+    lunchBreak?.startTime
+      ? `lunch is listed from ${formatTime(lunchBreak.startTime)}`
+      : null,
+  ]);
+
+  if (logistics.length === 0) {
+    return "";
+  }
+
+  return `For practical logistics, ${logistics.join(", and ")}. I would have breakfast before arriving, carry anything you need for the morning sessions, and use the tea and lunch breaks for networking.`;
+}
+
 function answerConferencePreparation(snapshot) {
   const days = getConferenceDays(snapshot.conference);
 
@@ -1743,9 +1774,12 @@ function answerConferencePreparation(snapshot) {
   return [
     `Based on the published ${snapshot.conference.shortName || snapshot.conference.title} programme, I would prepare around the four-day progression instead of treating it as one long agenda.`,
     "Before the event, shortlist your main questions, target contacts and must-attend sessions for each day, then leave room for updates because some session details are still marked TBC.",
+    getPreparationLogisticsAdvice(snapshot),
     dayPlans.join(" "),
     "After each day, capture follow-ups, contacts and decisions while they are still fresh so Day 4 becomes a clear action plan rather than just a closing day.",
-  ].join(" ");
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function getConferencePreparationSources(snapshot) {

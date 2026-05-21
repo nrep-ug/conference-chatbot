@@ -33,9 +33,26 @@ const QDRANT_COMPLEMENT_SNIPPET_CHARS = readInteger(
   "QDRANT_COMPLEMENT_SNIPPET_CHARS",
   700
 );
+const QDRANT_FULL_CONTEXT_ENABLED = readBoolean(
+  "QDRANT_FULL_CONTEXT_ENABLED",
+  false
+);
+const QDRANT_FULL_CONTEXT_MODE = (
+  process.env.QDRANT_FULL_CONTEXT_MODE || "broad"
+)
+  .trim()
+  .toLowerCase();
+const QDRANT_FULL_CONTEXT_MAX_CHARS = readInteger(
+  "QDRANT_FULL_CONTEXT_MAX_CHARS",
+  12000
+);
+const QDRANT_FULL_CONTEXT_SCROLL_LIMIT = readInteger(
+  "QDRANT_FULL_CONTEXT_SCROLL_LIMIT",
+  128
+);
 const answerCache = new Map();
 const CHATBOT_HELP_ANSWER =
-  "I can help with public information about the Renewable Energy Conference & Expo, including dates, venue, registration status, programme sessions, themes, halls, sponsors, contacts, and website links. I can only answer from the conference materials I have access to, so I will say when something is not listed.";
+  "I can help with public information about the Renewable Energy Conference & Expo, including dates, venue, registration status, programme sessions, themes, halls, sponsors, contacts, website links, and practical preparation guidance grounded in the published programme. I will say when official information is not listed.";
 const OUT_OF_SCOPE_ANSWER =
   "I’m here to help with the Renewable Energy Conference & Expo. Ask me about the venue, dates, registration, programme sessions, themes, halls, sponsors, contacts, or website links.";
 const CONFERENCE_TERMS =
@@ -190,6 +207,100 @@ function formatContext(searchResults, maxContextChars = MAX_CONTEXT_CHARS) {
   }
 
   return chunks.join("\n\n");
+}
+
+function getPayloadSortIndex(payload) {
+  const chunkIndex = Number(payload?.chunk_index);
+
+  return Number.isFinite(chunkIndex) ? chunkIndex : Number.MAX_SAFE_INTEGER;
+}
+
+function shouldUseFullQdrantContext(question) {
+  if (!QDRANT_FULL_CONTEXT_ENABLED) return false;
+  if (QDRANT_FULL_CONTEXT_MODE === "always") return true;
+
+  const normalized = normalizeQuestion(question);
+
+  return (
+    /\b(in depth|in-depth|deep dive|detailed|comprehensive|full view|complete view|overview|summary)\b/.test(
+      normalized
+    ) ||
+    /\btell me more\b/.test(normalized) ||
+    /\b(across|over)\s+(the\s+)?(4|four)\s+days\b/.test(normalized) ||
+    /\b(prepare|preparation|get ready|planning|make the most)\b/.test(
+      normalized
+    ) ||
+    /\b(recommend|guide|what should|prioritize|prioritise|new to|beginner|learn|expect)\b/.test(
+      normalized
+    )
+  );
+}
+
+async function retrieveFullQdrantContext(question, requestId) {
+  if (!shouldUseFullQdrantContext(question)) {
+    return { confident: false, context: "", sources: [] };
+  }
+
+  const startedAt = Date.now();
+  const points = [];
+  let offset;
+
+  try {
+    do {
+      const page = await qdrant.scroll(QDRANT_COLLECTION, {
+        limit: QDRANT_FULL_CONTEXT_SCROLL_LIMIT,
+        offset,
+        with_payload: true,
+        with_vector: false,
+      });
+      const batch = page.points || page.result?.points || [];
+      points.push(...batch);
+      offset = page.next_page_offset || page.result?.next_page_offset;
+    } while (offset);
+  } catch (error) {
+    logChatEvent("full_qdrant_context_error", {
+      requestId,
+      durationMs: Date.now() - startedAt,
+      error: error.message,
+    });
+
+    return { confident: false, context: "", sources: [] };
+  }
+
+  const sortedResults = points
+    .filter((point) => point.payload?.text)
+    .sort(
+      (a, b) =>
+        getPayloadSortIndex(a.payload) - getPayloadSortIndex(b.payload)
+    );
+
+  if (sortedResults.length === 0) {
+    logChatEvent("full_qdrant_context_empty", {
+      requestId,
+      durationMs: Date.now() - startedAt,
+    });
+
+    return { confident: false, context: "", sources: [] };
+  }
+
+  const context = [
+    "COMPLETE INDEXED PUBLIC REC26 CONTEXT:",
+    formatContext(sortedResults, QDRANT_FULL_CONTEXT_MAX_CHARS),
+  ].join("\n");
+  const sources = formatSources(sortedResults);
+
+  logChatEvent("full_qdrant_context_loaded", {
+    requestId,
+    durationMs: Date.now() - startedAt,
+    sourceCount: sources.length,
+    contextChars: context.length,
+  });
+
+  return {
+    confident: context.trim().length > 0,
+    context,
+    sources,
+  };
 }
 
 function formatSources(searchResults) {
@@ -409,6 +520,31 @@ async function answerQuestion(question, signal, requestId) {
     return payload;
   }
 
+  const fullQdrantContext = await retrieveFullQdrantContext(question, requestId);
+
+  if (fullQdrantContext.confident) {
+    const answerStartedAt = Date.now();
+    const answer = await askMistral({
+      question,
+      context: fullQdrantContext.context,
+      signal,
+    });
+    const payload = {
+      answer,
+      sources: fullQdrantContext.sources,
+    };
+
+    setCachedAnswer(question, payload);
+    logChatEvent("answer_full_qdrant_context", {
+      requestId,
+      durationMs: Date.now() - startedAt,
+      answerModelMs: Date.now() - answerStartedAt,
+      sourceCount: fullQdrantContext.sources.length,
+      contextChars: fullQdrantContext.context.length,
+    });
+    return payload;
+  }
+
   const plannedContext = await retrievePlannedRecContext(question, {
     signal,
     requestId,
@@ -534,6 +670,39 @@ function streamAnswer(question, signal, requestId) {
               durationMs: Date.now() - startedAt,
               sourceCount: payload.sources?.length || 0,
               complemented: Boolean(complementedAnswer),
+            });
+            controller.close();
+            return;
+          }
+
+          const fullQdrantContext = await retrieveFullQdrantContext(
+            question,
+            requestId
+          );
+
+          if (fullQdrantContext.confident) {
+            writeEvent(controller, encoder, "sources", fullQdrantContext.sources);
+
+            const answerStartedAt = Date.now();
+            const answer = await streamMistral({
+              question,
+              context: fullQdrantContext.context,
+              signal,
+              onToken: (token) =>
+                writeEvent(controller, encoder, "token", token),
+            });
+
+            setCachedAnswer(question, {
+              answer,
+              sources: fullQdrantContext.sources,
+            });
+            writeEvent(controller, encoder, "done", { cached: false });
+            logChatEvent("stream_full_qdrant_context", {
+              requestId,
+              durationMs: Date.now() - startedAt,
+              answerModelMs: Date.now() - answerStartedAt,
+              sourceCount: fullQdrantContext.sources.length,
+              contextChars: fullQdrantContext.context.length,
             });
             controller.close();
             return;
