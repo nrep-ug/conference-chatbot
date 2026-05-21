@@ -1669,6 +1669,97 @@ function answerBeginnerGuidance(snapshot) {
   ].join(" ");
 }
 
+function isConferencePreparationQuestion(normalized) {
+  return (
+    /\b(prepare|preparation|get ready|plan|planning|maximize|maximise|make the most)\b/.test(
+      normalized
+    ) &&
+    /\b(conference|rec|expo|event|programme|program|agenda|4 days|four days|days)\b/.test(
+      normalized
+    )
+  );
+}
+
+function summarizeDaySessions(snapshot, dayNumber, limit = 3) {
+  const sessions = snapshot.sessions
+    .filter((session) => session.day === dayNumber)
+    .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+  const listed = sessions
+    .slice(0, limit)
+    .map((session) =>
+      compact([session.title, session.venueHall ? `at ${session.venueHall}` : null]).join(
+        " "
+      )
+    )
+    .join("; ");
+
+  if (!listed) return "";
+
+  return sessions.length > limit
+    ? `${listed}, plus ${sessions.length - limit} more`
+    : listed;
+}
+
+function getDayPreparationAdvice(dayTheme) {
+  const theme = normalizeQuestion(dayTheme || "");
+
+  if (/policy|investment/.test(theme)) {
+    return "prepare policy, regulation, financing and programme-performance questions";
+  }
+
+  if (/technology|innovation/.test(theme)) {
+    return "identify the technologies, partners and investment opportunities you want to compare";
+  }
+
+  if (/implementation|sustainability/.test(theme)) {
+    return "bring practical project-delivery, clean-cooking, sustainability and implementation questions";
+  }
+
+  if (/impact|scale|regional/.test(theme)) {
+    return "focus on scale-up, regional leadership, productive use and the commitments you want to follow up";
+  }
+
+  return "prepare questions tied to this day's published focus area";
+}
+
+function answerConferencePreparation(snapshot) {
+  const days = getConferenceDays(snapshot.conference);
+
+  if (days.length === 0) {
+    return "I could not find the four-day conference structure in the published materials.";
+  }
+
+  const dayPlans = days.map((day, index) => {
+    const dayNumber = getDayNumberFromDay(day, index);
+    const dateText = day.date ? ` (${day.date})` : "";
+    const sessions = summarizeDaySessions(snapshot, dayNumber);
+    const sessionText = sessions ? ` Sessions to watch: ${sessions}.` : "";
+
+    return `Day ${dayNumber}${dateText} - ${day.theme}: ${getDayPreparationAdvice(
+      day.theme
+    )}.${sessionText}`;
+  });
+
+  return [
+    `Based on the published ${snapshot.conference.shortName || snapshot.conference.title} programme, I would prepare around the four-day progression instead of treating it as one long agenda.`,
+    "Before the event, shortlist your main questions, target contacts and must-attend sessions for each day, then leave room for updates because some session details are still marked TBC.",
+    dayPlans.join(" "),
+    "After each day, capture follow-ups, contacts and decisions while they are still fresh so Day 4 becomes a clear action plan rather than just a closing day.",
+  ].join(" ");
+}
+
+function getConferencePreparationSources(snapshot) {
+  const days = getConferenceDays(snapshot.conference);
+
+  return days.flatMap((day, index) => {
+    const dayNumber = getDayNumberFromDay(day, index);
+    return snapshot.sessions
+      .filter((session) => session.day === dayNumber)
+      .slice(0, 3)
+      .map((session) => sourceFor("session", session, session.title));
+  });
+}
+
 function answerDayThemeAttendance(snapshot, day) {
   const days = getConferenceDays(snapshot.conference);
   const dayIndex = days.indexOf(day);
@@ -1721,6 +1812,7 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     ) ||
     /\bactually start\b/.test(normalized);
   const asksTechnologyAreas = isTechnologyAreasQuestion(normalized);
+  const asksPreparation = isConferencePreparationQuestion(normalized);
   const oneDayOnly = /\b(only have one day|just one day|single day|one day)\b/.test(
     normalized
   );
@@ -1753,6 +1845,13 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
         ? answerConferenceDeepDive(snapshot)
         : answerConferenceOverview(snapshot),
       sources
+    );
+  }
+
+  if (asksPreparation) {
+    addPart(
+      answerConferencePreparation(snapshot),
+      getConferencePreparationSources(snapshot)
     );
   }
 
@@ -2133,7 +2232,7 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   const normalized = normalizeQuestion(question);
 
   if (
-    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|focus|sponsor|partner|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|exhibition|exhibit|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer|renewable|energy|beginner|new|implementation|sustainability|technology|technologies|technical|ceremony|opening|closing|start|starts|starting|begin|begins|cooking|cookstove|solco|biofuel|geothermal|nuclear|productive use|efficiency)/.test(
+    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|focus|sponsor|partner|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|exhibition|exhibit|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer|renewable|energy|beginner|new|implementation|sustainability|technology|technologies|technical|ceremony|opening|closing|start|starts|starting|begin|begins|prepare|preparation|planning|maximize|maximise|cooking|cookstove|solco|biofuel|geothermal|nuclear|productive use|efficiency)/.test(
       normalized
     )
   ) {
@@ -2152,6 +2251,16 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
 
   if (compoundAnswer) {
     return compoundAnswer;
+  }
+
+  if (isConferencePreparationQuestion(normalized)) {
+    return {
+      answer: answerConferencePreparation(snapshot),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...getConferencePreparationSources(snapshot),
+      ],
+    };
   }
 
   if (isGenericSessionsOverviewQuestion(normalized)) {

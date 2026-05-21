@@ -260,7 +260,7 @@ The PM2 config:
 - runs two clustered Next.js instances
 - writes logs to `logs/pm2-out.log` and `logs/pm2-error.log`
 
-For the target VPS with 14 CPU cores and 16 GB RAM, the recommended default is:
+For the target VPS with 14 CPU cores and 20 GB RAM, the recommended default is:
 
 ```bash
 CHAT_MODEL=command-r
