@@ -51,8 +51,17 @@ const QDRANT_FULL_CONTEXT_SCROLL_LIMIT = readInteger(
   128
 );
 const answerCache = new Map();
-const CHATBOT_HELP_ANSWER =
-  "I can help with public information about the Renewable Energy Conference & Expo, including dates, venue, registration status, programme sessions, themes, halls, sponsors, contacts, website links, and practical preparation guidance grounded in the published programme. I will say when official information is not listed.";
+const CHATBOT_HELP_ANSWER = [
+  "I can help with public information about the Renewable Energy Conference & Expo.",
+  "",
+  "**You can ask about:**",
+  "- Dates, venue, halls, and logistics",
+  "- Registration status, contacts, and website links",
+  "- Programme sessions, themes, ceremonies, tea breaks, and lunch",
+  "- Sponsors, partners, and practical preparation guidance",
+  "",
+  "I will say when official information is not listed in the conference materials.",
+].join("\n");
 const OUT_OF_SCOPE_ANSWER =
   "I’m here to help with the Renewable Energy Conference & Expo. Ask me about the venue, dates, registration, programme sessions, themes, halls, sponsors, contacts, or website links.";
 const CONFERENCE_TERMS =
@@ -420,7 +429,12 @@ function appendComplementContext(directAnswer, qdrantContext) {
     return directAnswer.answer;
   }
 
-  return `${directAnswer.answer}\n\nAdditional indexed context: ${snippets.join(" ")}`;
+  return [
+    directAnswer.answer,
+    "",
+    "**Additional indexed context**",
+    ...snippets.map((snippet) => `- ${snippet}`),
+  ].join("\n");
 }
 
 async function complementDirectAnswer(question, directAnswer, signal, requestId, startedAt) {

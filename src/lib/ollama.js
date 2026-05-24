@@ -100,6 +100,8 @@ function buildMessages({ question, context }) {
         "If the user's request is casual, entertaining, coding-related, or outside the conference scope, redirect them to ask about the conference instead of answering from unrelated context.",
         "For questions about what you can do, explain that you answer questions about dates, venue, registration, programme sessions, themes, sponsors, contacts, and website links.",
         "Do not invent facts, registration actions, prices, dates, speakers, or schedules.",
+        "Format responses as clean Markdown: use short paragraphs, bullet lists for multiple items, numbered lists for ranked recommendations, and bold labels for dates, venues, sessions, and practical advice.",
+        "Do not wrap the whole answer in a code block. Avoid tables unless the user explicitly asks for one.",
         "Be concise and helpful.",
       ].join(" "),
     },

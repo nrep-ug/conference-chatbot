@@ -56,6 +56,30 @@ function withTerminalPeriod(value) {
   return /[.!?]$/.test(text) ? text : `${text}.`;
 }
 
+function markdownList(items) {
+  return compact(items)
+    .map((item) => `- ${String(item).trim()}`)
+    .join("\n");
+}
+
+function markdownNumberedList(items) {
+  return compact(items)
+    .map((item, index) => `${index + 1}. ${String(item).trim()}`)
+    .join("\n");
+}
+
+function markdownDetails(items) {
+  return markdownList(
+    items
+      .filter(([, value]) => value !== null && value !== undefined && value !== "")
+      .map(([label, value]) => `**${label}:** ${value}`)
+  );
+}
+
+function joinMarkdownSections(sections) {
+  return compact(sections).join("\n\n");
+}
+
 function formatDate(value) {
   if (!value) return "";
 
@@ -313,14 +337,15 @@ function answerSponsors(snapshot) {
   const categoriesById = new Map(
     snapshot.sponsorCategories.map((category) => [category.$id, category.name])
   );
-  const sponsorList = activeSponsors
-    .map((sponsor) => {
+  const sponsorList = activeSponsors.map((sponsor) => {
       const category = categoriesById.get(sponsor.categoryId);
-      return category ? `${sponsor.name} (${category})` : sponsor.name;
-    })
-    .join(", ");
+    return category ? `${sponsor.name} (${category})` : sponsor.name;
+  });
 
-  return `The listed sponsors are: ${sponsorList}.`;
+  return joinMarkdownSections([
+    "The listed sponsors are:",
+    markdownList(sponsorList),
+  ]);
 }
 
 function findMentionedSponsor(normalized, sponsors) {
@@ -343,23 +368,23 @@ function answerSpecificSponsor(sponsor, snapshot) {
   const category = snapshot.sponsorCategories.find(
     (item) => item.$id === sponsor.categoryId
   );
-  const parts = [
+  const details = [
     `${sponsor.name} is listed as a sponsor for ${snapshot.conference.title}.`,
   ];
 
   if (category?.name) {
-    parts.push(`Category: ${category.name}.`);
+    details.push(`**Category:** ${category.name}`);
   }
 
   if (sponsor.description) {
-    parts.push(stripHtml(sponsor.description));
+    details.push(stripHtml(sponsor.description));
   }
 
   if (sponsor.siteUrl) {
-    parts.push(`Website: ${sponsor.siteUrl}.`);
+    details.push(`**Website:** ${sponsor.siteUrl}`);
   }
 
-  return parts.join(" ");
+  return joinMarkdownSections(details);
 }
 
 function findMentionedSession(normalized, sessions) {
@@ -388,24 +413,34 @@ function truncateText(text, maxLength = 900) {
 
 function answerSpecificSession(session, normalized) {
   if (/(which hall|what hall|where|venue|room)/.test(normalized)) {
-    return compact([
+    return joinMarkdownSections([
       `${session.title} is scheduled in ${session.venueHall}.`,
-      `Day ${session.day}.`,
-      session.startTime && session.toTime
-        ? `Time: ${formatTime(session.startTime)} to ${formatTime(session.toTime)}.`
-        : null,
-    ]).join(" ");
+      markdownDetails([
+        ["Day", session.day],
+        [
+          "Time",
+          session.startTime && session.toTime
+            ? `${formatTime(session.startTime)} to ${formatTime(session.toTime)}`
+            : null,
+        ],
+      ]),
+    ]);
   }
 
-  return compact([
+  return joinMarkdownSections([
     `${session.title} is scheduled for Day ${session.day}.`,
-    session.startTime && session.toTime
-      ? `Time: ${formatTime(session.startTime)} to ${formatTime(session.toTime)}.`
-      : null,
-    session.venueHall ? `Venue: ${session.venueHall}.` : null,
-    session.theme ? `Theme: ${session.theme}.` : null,
+    markdownDetails([
+      [
+        "Time",
+        session.startTime && session.toTime
+          ? `${formatTime(session.startTime)} to ${formatTime(session.toTime)}`
+          : null,
+      ],
+      ["Venue", session.venueHall],
+      ["Theme", session.theme],
+    ]),
     session.preamble ? truncateText(stripHtml(session.preamble)) : null,
-  ]).join(" ");
+  ]);
 }
 
 function extractRequestedDay(normalized) {
@@ -449,8 +484,7 @@ function answerDaySchedule(day, snapshot) {
         session.title,
         session.venueHall ? `at ${session.venueHall}` : null,
       ]).join(" ")
-    )
-    .join("; ");
+    );
   const blockSummary = timeBlocks
     .slice(0, 5)
     .map((block) =>
@@ -459,14 +493,17 @@ function answerDaySchedule(day, snapshot) {
         block.label,
         block.type ? `(${block.type})` : null,
       ]).join(" ")
-    )
-    .join("; ");
+    );
 
-  return compact([
+  return joinMarkdownSections([
     `Day ${day}${dayInfo?.date ? ` (${dayInfo.date})` : ""}${dayInfo?.theme ? ` focuses on ${dayInfo.theme}` : ""}.`,
-    blockSummary ? `Main blocks: ${blockSummary}.` : null,
-    sessionSummary ? `Sessions include: ${sessionSummary}.` : null,
-  ]).join(" ");
+    blockSummary.length
+      ? `**Main blocks**\n${markdownList(blockSummary)}`
+      : null,
+    sessionSummary.length
+      ? `**Sessions include**\n${markdownList(sessionSummary)}`
+      : null,
+  ]);
 }
 
 function getConferenceDays(conference) {
@@ -501,10 +538,12 @@ function answerDaysCount(snapshot) {
       const dayNumber =
         day.label.match(/Day\s+(\d+)/i)?.[1] || String(index + 1);
       return `Day ${dayNumber}: ${day.theme}`;
-    })
-    .join("; ");
+    });
 
-  return `${snapshot.conference.title} runs for ${dayCount} days, from ${formatConferenceDates(snapshot.conference)}. The daily focus areas are: ${focusAreas}.`;
+  return joinMarkdownSections([
+    `${snapshot.conference.title} runs for **${dayCount} days**, from **${formatConferenceDates(snapshot.conference)}**.`,
+    `**Daily focus areas**\n${markdownList(focusAreas)}`,
+  ]);
 }
 
 function uniqueValues(values) {
@@ -560,11 +599,11 @@ function answerLearningOutcomes(snapshot) {
     return "I could not find detailed learning themes in the conference materials.";
   }
 
-  return [
+  return joinMarkdownSections([
     `Across the four days of ${snapshot.conference.shortName || snapshot.conference.title}, you can expect a progression from policy and investment into technology, implementation, and regional scale-up.`,
-    withTerminalPeriod(daySummaries.join("; ")),
+    `**What each day builds toward**\n${markdownList(daySummaries)}`,
     "In practical terms, the programme should help you understand renewable-energy policy, investment pathways, technology options, delivery models, sustainability issues, and how projects can scale in Uganda and the region.",
-  ].join(" ");
+  ]);
 }
 
 function answerConferenceOverview(snapshot) {
@@ -574,19 +613,21 @@ function answerConferenceOverview(snapshot) {
       const dayNumber =
         day.label.match(/Day\s+(\d+)/i)?.[1] || String(index + 1);
       return `Day ${dayNumber}: ${day.theme}`;
-    })
-    .join("; ");
+    });
 
-  return compact([
+  return joinMarkdownSections([
     `${snapshot.conference.title} (${snapshot.conference.shortName}) is Uganda's premier renewable energy conference for ${snapshot.conference.year}.`,
-    `It will run from ${formatConferenceDates(snapshot.conference)} at ${snapshot.conference.venue}, ${snapshot.conference.location}.`,
-    `The conference theme is "${snapshot.conference.theme}".`,
-    dayThemes ? `The four daily focus areas are ${dayThemes}.` : null,
+    markdownDetails([
+      ["Dates", formatConferenceDates(snapshot.conference)],
+      ["Venue", `${snapshot.conference.venue}, ${snapshot.conference.location}`],
+      ["Theme", `"${snapshot.conference.theme}"`],
+    ]),
+    dayThemes.length ? `**Daily focus areas**\n${markdownList(dayThemes)}` : null,
     `The active programme currently lists ${snapshot.sessions.length} sessions and ${snapshot.timeBlocks.length} time blocks, including conference sessions, exhibitions, tea breaks, and lunch breaks.`,
     snapshot.conference.mainWebsiteUrl
-      ? `Website: ${snapshot.conference.mainWebsiteUrl}.`
+      ? `**Website:** ${snapshot.conference.mainWebsiteUrl}`
       : null,
-  ]).join(" ");
+  ]);
 }
 
 function answerConferenceDeepDive(snapshot) {
@@ -595,8 +636,7 @@ function answerConferenceDeepDive(snapshot) {
     .map((day, index) => {
       const dayNumber = getDayNumberFromDay(day, index);
       return `Day ${dayNumber} (${day.date}): ${day.theme}`;
-    })
-    .join("; ");
+    });
   const halls = getVenueHalls(snapshot).slice(0, 8);
   const technologyAreas = getTechnologyDiscussionAreas(snapshot)
     .map((area) => area.label)
@@ -608,24 +648,31 @@ function answerConferenceDeepDive(snapshot) {
     ? "Registration is currently open."
     : snapshot.conference.regClosedMessage || "Registration is currently closed.";
 
-  return compact([
+  return joinMarkdownSections([
     `${snapshot.conference.title} (${snapshot.conference.shortName}) is the active REC conference for ${snapshot.conference.year}.`,
-    `It runs from ${formatConferenceDates(snapshot.conference)} at ${snapshot.conference.venue}, ${snapshot.conference.location}.`,
-    `Theme: "${snapshot.conference.theme}".`,
-    dayThemes ? `Daily focus areas: ${dayThemes}.` : null,
+    markdownDetails([
+      ["Dates", formatConferenceDates(snapshot.conference)],
+      ["Venue", `${snapshot.conference.venue}, ${snapshot.conference.location}`],
+      ["Theme", `"${snapshot.conference.theme}"`],
+    ]),
+    dayThemes.length ? `**Daily focus areas**\n${markdownList(dayThemes)}` : null,
     `The published programme currently has ${snapshot.sessions.length} listed sessions and ${snapshot.timeBlocks.length} time blocks, including sessions, exhibitions, breaks, lunch, and ceremonies.`,
-    halls.length ? `Main spaces include ${halls.join(", ")}.` : null,
+    halls.length ? `**Main spaces**\n${markdownList(halls)}` : null,
     technologyAreas.length
-      ? `Technology and sector areas appearing in the programme include ${technologyAreas.join(", ")}.`
+      ? `**Technology and sector areas in the programme**\n${markdownList(technologyAreas)}`
       : null,
-    sponsors.length ? `Listed sponsors and partners include ${sponsors.join(", ")}.` : null,
+    sponsors.length
+      ? `**Listed sponsors and partners include**\n${markdownList(sponsors)}`
+      : null,
     withTerminalPeriod(registrationStatus),
-    snapshot.conference.mainWebsiteUrl ? `Website: ${snapshot.conference.mainWebsiteUrl}.` : null,
-  ]).join(" ");
+    snapshot.conference.mainWebsiteUrl
+      ? `**Website:** ${snapshot.conference.mainWebsiteUrl}`
+      : null,
+  ]);
 }
 
 function answerConferenceDatesAndVenue(snapshot) {
-  return `${snapshot.conference.title} will run from ${formatConferenceDates(snapshot.conference)} at ${snapshot.conference.venue}, ${snapshot.conference.location}.`;
+  return `${snapshot.conference.title} will run from **${formatConferenceDates(snapshot.conference)}** at **${snapshot.conference.venue}, ${snapshot.conference.location}**.`;
 }
 
 function findFirstScheduledBlock(snapshot) {
@@ -646,15 +693,29 @@ function answerConferenceStart(snapshot) {
   const firstBlock = findFirstScheduledBlock(snapshot);
   const firstSession = findFirstSession(snapshot);
 
-  return compact([
+  return joinMarkdownSections([
     `${snapshot.conference.title} starts on Day 1${firstDay?.date ? ` (${firstDay.date})` : ""}.`,
     firstBlock
-      ? `The earliest listed programme block is ${firstBlock.label}, from ${formatTime(firstBlock.startTime)} to ${formatTime(firstBlock.endTime)} Kampala time${firstBlock.venueHalls?.length ? ` at ${firstBlock.venueHalls.join(", ")}` : ""}.`
+      ? markdownDetails([
+          ["Earliest listed block", firstBlock.label],
+          [
+            "Time",
+            `${formatTime(firstBlock.startTime)} to ${formatTime(
+              firstBlock.endTime
+            )} Kampala time`,
+          ],
+          [
+            "Venue",
+            firstBlock.venueHalls?.length
+              ? firstBlock.venueHalls.join(", ")
+              : null,
+          ],
+        ])
       : null,
     firstSession
       ? `The first listed sessions begin at ${formatTime(firstSession.startTime)} Kampala time.`
       : null,
-  ]).join(" ");
+  ]);
 }
 
 function answerDailyThemes(snapshot) {
@@ -669,10 +730,12 @@ function answerDailyThemes(snapshot) {
       const dayNumber =
         day.label.match(/Day\s+(\d+)/i)?.[1] || String(index + 1);
       return `Day ${dayNumber} (${day.date}): ${day.theme}`;
-    })
-    .join("; ");
+    });
 
-  return `The daily themes are: ${dailyThemes}.`;
+  return joinMarkdownSections([
+    "The daily themes are:",
+    markdownList(dailyThemes),
+  ]);
 }
 
 function answerProgramOverview(snapshot) {
@@ -688,17 +751,18 @@ function answerProgramOverview(snapshot) {
       const dayNumber =
         day.label.match(/Day\s+(\d+)/i)?.[1] || String(index + 1);
       return `Day ${dayNumber}: ${day.theme}`;
-    })
-    .join("; ");
+    });
 
-  return compact([
+  return joinMarkdownSections([
     `${snapshot.conference.shortName || snapshot.conference.title} is a ${days.length || program?.daysCount || ""}-day programme at ${snapshot.conference.venue}, ${snapshot.conference.location}.`,
-    `Conference theme: ${snapshot.conference.theme}.`,
-    daySummary ? `Daily focus: ${daySummary}.` : null,
+    `**Conference theme:** ${snapshot.conference.theme}`,
+    daySummary.length ? `**Daily focus**\n${markdownList(daySummary)}` : null,
     `The published data currently lists ${snapshot.sessions.length} programme sessions and ${snapshot.timeBlocks.length} time blocks.`,
-    sessionThemes.length ? `Session themes include ${sessionThemes.join("; ")}.` : null,
-    halls.length ? `Venue halls include ${halls.join(", ")}.` : null,
-  ]).join(" ");
+    sessionThemes.length
+      ? `**Session themes include**\n${markdownList(sessionThemes)}`
+      : null,
+    halls.length ? `**Venue halls include**\n${markdownList(halls)}` : null,
+  ]);
 }
 
 function answerSessionsOverview(snapshot, requestedDay) {
@@ -728,19 +792,25 @@ function answerSessionsOverview(snapshot, requestedDay) {
             session.title,
             session.venueHall ? `(${session.venueHall})` : null,
           ]).join(" ")
-        )
-        .join("; ");
-      const remaining = daySessions.length > 4 ? `, plus ${daySessions.length - 4} more` : "";
+        );
+      const remaining =
+        daySessions.length > 4
+          ? `Plus ${daySessions.length - 4} more listed session${daySessions.length - 4 === 1 ? "" : "s"}.`
+          : "";
 
-      return `Day ${day}: ${titles}${remaining}`;
+      return joinMarkdownSections([
+        `**Day ${day}**`,
+        markdownList(titles),
+        remaining,
+      ]);
     })
-    .join(". ");
+    .join("\n\n");
 
   const prefix = requestedDay
     ? `Yes. I found ${sessions.length} listed session${sessions.length === 1 ? "" : "s"} for Day ${requestedDay}.`
     : `Yes. I found ${sessions.length} listed programme session${sessions.length === 1 ? "" : "s"} across the active conference.`;
 
-  return `${prefix} ${daySummaries}.`;
+  return joinMarkdownSections([prefix, daySummaries]);
 }
 
 function getVenueHalls(snapshot) {
@@ -758,7 +828,10 @@ function answerVenueHalls(snapshot) {
     return "I could not find specific hall details in the published conference materials.";
   }
 
-  return `The listed conference spaces are: ${halls.join(", ")}.`;
+  return joinMarkdownSections([
+    "The listed conference spaces are:",
+    markdownList(halls),
+  ]);
 }
 
 function findRequestedHall(normalized, snapshot) {
@@ -796,10 +869,12 @@ function answerSessionsByHall(snapshot, hall) {
         `${formatTime(session.startTime)} to ${formatTime(session.toTime)}`,
         session.title,
       ]).join(": ")
-    )
-    .join("; ");
+    );
 
-  return `Sessions listed for ${hall}: ${summary}.`;
+  return joinMarkdownSections([
+    `Sessions listed for **${hall}**:`,
+    markdownList(summary),
+  ]);
 }
 
 function getHallSessions(snapshot, hall) {
@@ -847,10 +922,12 @@ function answerScheduleByHall(snapshot, hall) {
         block.label,
         block.type ? `(${block.type})` : null,
       ]).join(": ")
-    )
-    .join("; ");
+    );
 
-  return `Scheduled items listed for ${hall}: ${summary}.`;
+  return joinMarkdownSections([
+    `Scheduled items listed for **${hall}**:`,
+    markdownList(summary),
+  ]);
 }
 
 function getDayThemeMatch(normalized, snapshot) {
@@ -908,10 +985,12 @@ function answerSessionsForDayTheme(snapshot, day) {
           ? `(${formatTime(session.startTime)} to ${formatTime(session.toTime)})`
           : null,
       ]).join(" ")
-    )
-    .join("; ");
+    );
 
-  return `That topic maps to Day ${dayNumber}: ${day.theme}. Listed sessions for that day are: ${summary}.`;
+  return joinMarkdownSections([
+    `That topic maps to **Day ${dayNumber}: ${day.theme}**.`,
+    `**Listed sessions for that day**\n${markdownList(summary)}`,
+  ]);
 }
 
 function getTopicTokens(normalized) {
@@ -995,10 +1074,12 @@ function answerSessionsByTopic(sessions) {
           : null,
         session.theme ? `Theme: ${session.theme}` : null,
       ]).join(", ")
-    )
-    .join("; ");
+    );
 
-  return `Matching published sessions: ${summary}.`;
+  return joinMarkdownSections([
+    "Matching published sessions:",
+    markdownList(summary),
+  ]);
 }
 
 function isFilteredSessionQuestion(normalized) {
@@ -1154,7 +1235,10 @@ function answerFinanceOneDayRecommendation(snapshot) {
     .map((item) => item.session);
   const themeText = dayTheme?.theme ? `: ${dayTheme.theme}` : "";
 
-  return `If you can only attend one day for finance or investment, I would choose Day ${bestDay}${themeText}. Relevant published sessions that day include: ${formatRecommendedSessions(bestDaySessions)}.`;
+  return joinMarkdownSections([
+    `If you can only attend one day for finance or investment, I would choose **Day ${bestDay}${themeText}**.`,
+    `**Relevant published sessions that day**\n${formatRecommendedSessions(bestDaySessions)}`,
+  ]);
 }
 
 function answerFinanceRecommendations(snapshot, options = {}) {
@@ -1171,7 +1255,7 @@ function answerFinanceRecommendations(snapshot, options = {}) {
   }
 
   const recommendations = groups
-    .map((group, index) => {
+    .map((group) => {
       const schedule = group.sessions
         .sort((a, b) => a.day - b.day || new Date(a.startTime) - new Date(b.startTime))
         .map((session) =>
@@ -1194,11 +1278,14 @@ function answerFinanceRecommendations(snapshot, options = {}) {
           "It is listed as an Africa Development Bank session, so it is likely the strongest development-finance-oriented session currently published, although details are still marked TBC.";
       }
 
-      return `${index + 1}. ${group.title}: ${schedule}. Why: ${rationale}`;
+      return `**${group.title}**: ${schedule}. Why: ${rationale}`;
     })
-    .join(" ");
+    .filter(Boolean);
 
-  return `For someone in finance, I would prioritize these published REC26 & EXPO sessions: ${recommendations}`;
+  return joinMarkdownSections([
+    "For someone in finance, I would prioritize these published REC26 & EXPO sessions:",
+    markdownNumberedList(recommendations),
+  ]);
 }
 
 function findSessionsByTitleParts(snapshot, titleParts) {
@@ -1246,7 +1333,7 @@ function findSessionsByContentParts(snapshot, parts) {
 }
 
 function formatRecommendedSessions(sessions) {
-  return sessions
+  const items = sessions
     .map((session) =>
       compact([
         session.title,
@@ -1256,8 +1343,9 @@ function formatRecommendedSessions(sessions) {
           ? `${formatTime(session.startTime)} to ${formatTime(session.toTime)}`
           : null,
       ]).join(", ")
-    )
-    .join("; ");
+    );
+
+  return markdownList(items);
 }
 
 function answerPolicyRecommendations(snapshot) {
@@ -1273,11 +1361,11 @@ function answerPolicyRecommendations(snapshot) {
     return "I could not find policy-focused sessions in the published programme.";
   }
 
-  return [
+  return joinMarkdownSections([
     "For policymakers or government participants, I would start with Day 1 because its focus is Renewable Energy Policy & Investment.",
-    `Relevant published sessions include: ${formatRecommendedSessions(sessions.slice(0, 5))}.`,
+    `**Relevant published sessions**\n${formatRecommendedSessions(sessions.slice(0, 5))}`,
     "I would also consider the Uganda - European (EU) Business Forum because it connects policy dialogue with investment partnerships and green industrialisation.",
-  ].join(" ");
+  ]);
 }
 
 function answerProjectDeveloperRecommendations(snapshot) {
@@ -1293,11 +1381,11 @@ function answerProjectDeveloperRecommendations(snapshot) {
     return "I could not find project-development-focused sessions in the published programme.";
   }
 
-  return [
+  return joinMarkdownSections([
     "For project developers, I would prioritize sessions that connect project pipelines, investment, implementation, and productive use.",
-    `Relevant published sessions include: ${formatRecommendedSessions(sessions.slice(0, 6))}.`,
+    `**Relevant published sessions**\n${formatRecommendedSessions(sessions.slice(0, 6))}`,
     "The Uganda - European (EU) Business Forum is especially relevant because it explicitly covers investors, developers, partnerships, B2B meetings, deal-making, and de-risking.",
-  ].join(" ");
+  ]);
 }
 
 const TOPIC_RECOMMENDATION_PROFILES = [
@@ -1356,10 +1444,11 @@ function getTopicRecommendationMatches(snapshot, normalized) {
 }
 
 function answerTopicRecommendation(match) {
-  return [
-    `For ${match.profile.label}, I would prioritize: ${formatRecommendedSessions(match.sessions)}.`,
+  return joinMarkdownSections([
+    `For ${match.profile.label}, I would prioritize:`,
+    formatRecommendedSessions(match.sessions),
     match.profile.rationale,
-  ].join(" ");
+  ]);
 }
 
 const TECHNOLOGY_DISCUSSION_AREAS = [
@@ -1437,10 +1526,13 @@ function answerTechnologyDiscussionAreas(snapshot) {
         )
         .join("; ");
       return `${area.label}: ${sessions}`;
-    })
-    .join("; ");
+    });
 
-  return `Based on the published programme, renewable-energy technology areas likely to be discussed include ${summary}. Some session details are still marked TBC, so this reflects the current published data.`;
+  return joinMarkdownSections([
+    "Based on the published programme, renewable-energy technology areas likely to be discussed include:",
+    markdownList(summary),
+    "Some session details are still marked TBC, so this reflects the current published data.",
+  ]);
 }
 
 function isTechnologyAreasQuestion(normalized) {
@@ -1491,7 +1583,18 @@ function answerCeremonyBlock(snapshot, block) {
     ? ` at ${block.venueHalls.join(", ")}`
     : "";
 
-  return `${block.label} is scheduled for Day ${block.day}${dateText}, from ${formatTime(block.startTime)} to ${formatTime(block.endTime)} Kampala time${venueText}.`;
+  return joinMarkdownSections([
+    `${block.label} is scheduled for **Day ${block.day}${dateText}**.`,
+    markdownDetails([
+      [
+        "Time",
+        `${formatTime(block.startTime)} to ${formatTime(
+          block.endTime
+        )} Kampala time`,
+      ],
+      ["Venue", venueText ? venueText.replace(/^ at /, "") : null],
+    ]),
+  ]);
 }
 
 function answerMealBreaks(snapshot) {
@@ -1527,8 +1630,7 @@ function answerFilteredBreaks(snapshot, filter = "all") {
         block.label,
         `${formatTime(block.startTime)} to ${formatTime(block.endTime)}`,
       ]).join(": ")
-    )
-    .join("; ");
+    );
 
   const label =
     filter === "tea"
@@ -1537,7 +1639,10 @@ function answerFilteredBreaks(snapshot, filter = "all") {
         ? "lunch breaks"
         : "listed breaks";
 
-  return `The programme includes these ${label}: ${summary}.`;
+  return joinMarkdownSections([
+    `The programme includes these ${label}:`,
+    markdownList(summary),
+  ]);
 }
 
 function answerTimeBlocksByType(snapshot, type, label) {
@@ -1556,10 +1661,12 @@ function answerTimeBlocksByType(snapshot, type, label) {
         `${formatTime(block.startTime)} to ${formatTime(block.endTime)}`,
         block.venueHalls?.length ? block.venueHalls.join(", ") : null,
       ]).join(": ")
-    )
-    .join("; ");
+    );
 
-  return `Yes. The listed ${label} blocks are: ${summary}.`;
+  return joinMarkdownSections([
+    `Yes. The listed ${label} blocks are:`,
+    markdownList(summary),
+  ]);
 }
 
 function getSessionDurationMinutes(session) {
@@ -1588,10 +1695,12 @@ function answerLongRunningSessions(snapshot) {
         session.venueHall,
         `${formatTime(session.startTime)} to ${formatTime(session.toTime)}`,
       ]).join(", ")
-    )
-    .join("; ");
+    );
 
-  return `The sessions that run for most of the day are: ${summary}.`;
+  return joinMarkdownSections([
+    "The sessions that run for most of the day are:",
+    markdownList(summary),
+  ]);
 }
 
 function getCategoryNameById(snapshot) {
@@ -1615,7 +1724,10 @@ function answerSponsorCategories(snapshot) {
     return "No active sponsor categories are currently listed.";
   }
 
-  return `The active sponsor categories are: ${categories.map((category) => category.name).join(", ")}.`;
+  return joinMarkdownSections([
+    "The active sponsor categories are:",
+    markdownList(categories.map((category) => category.name)),
+  ]);
 }
 
 function answerPartners(snapshot) {
@@ -1628,11 +1740,14 @@ function answerPartners(snapshot) {
     return "No active partners are currently listed for the conference.";
   }
 
-  return `The listed partners are: ${partners
-    .map((partner) =>
-      partner.siteUrl ? `${partner.name} (${partner.siteUrl})` : partner.name
-    )
-    .join(", ")}.`;
+  return joinMarkdownSections([
+    "The listed partners are:",
+    markdownList(
+      partners.map((partner) =>
+        partner.siteUrl ? `${partner.name} (${partner.siteUrl})` : partner.name
+      )
+    ),
+  ]);
 }
 
 function answerFeaturedSponsors(snapshot) {
@@ -1645,12 +1760,15 @@ function answerFeaturedSponsors(snapshot) {
     return "No sponsors are currently marked as featured in the published conference data.";
   }
 
-  return `The featured sponsors are: ${featured
-    .map((sponsor) => {
-      const category = categoriesById.get(sponsor.categoryId);
-      return category ? `${sponsor.name} (${category})` : sponsor.name;
-    })
-    .join(", ")}.`;
+  return joinMarkdownSections([
+    "The featured sponsors are:",
+    markdownList(
+      featured.map((sponsor) => {
+        const category = categoriesById.get(sponsor.categoryId);
+        return category ? `${sponsor.name} (${category})` : sponsor.name;
+      })
+    ),
+  ]);
 }
 
 function answerBeginnerGuidance(snapshot) {
@@ -1659,14 +1777,13 @@ function answerBeginnerGuidance(snapshot) {
     .map((day, index) => {
       const dayNumber = getDayNumberFromDay(day, index);
       return `Day ${dayNumber}: ${day.theme}`;
-    })
-    .join("; ");
+    });
 
-  return [
+  return joinMarkdownSections([
     "If you are new to renewable energy, I would use the conference structure as your guide.",
-    `Start with the daily focus areas: ${dayText}.`,
-    "Day 1 gives the policy and investment foundation, Day 2 introduces technology and innovation, Day 3 moves into implementation and sustainability, and Day 4 focuses on impact, scale, and regional leadership.",
-  ].join(" ");
+    `**Start with the daily focus areas**\n${markdownList(dayText)}`,
+    "**Practical advice:** Day 1 gives the policy and investment foundation, Day 2 introduces technology and innovation, Day 3 moves into implementation and sustainability, and Day 4 focuses on impact, scale, and regional leadership.",
+  ]);
 }
 
 function isConferencePreparationQuestion(normalized) {
@@ -1771,15 +1888,13 @@ function answerConferencePreparation(snapshot) {
     )}.${sessionText}`;
   });
 
-  return [
+  return joinMarkdownSections([
     `Based on the published ${snapshot.conference.shortName || snapshot.conference.title} programme, I would prepare around the four-day progression instead of treating it as one long agenda.`,
     "Before the event, shortlist your main questions, target contacts and must-attend sessions for each day, then leave room for updates because some session details are still marked TBC.",
     getPreparationLogisticsAdvice(snapshot),
-    dayPlans.join(" "),
+    `**Day-by-day preparation**\n${markdownList(dayPlans)}`,
     "After each day, capture follow-ups, contacts and decisions while they are still fresh so Day 4 becomes a clear action plan rather than just a closing day.",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  ]);
 }
 
 function getConferencePreparationSources(snapshot) {
@@ -1806,10 +1921,10 @@ function answerDayThemeAttendance(snapshot, day) {
     return `For ${day.theme}, I would focus on Day ${dayNumber}, but I could not find listed sessions for that day.`;
   }
 
-  return [
+  return joinMarkdownSections([
     `If you care about ${day.theme}, focus on Day ${dayNumber}.`,
-    `Relevant listed sessions are: ${formatRecommendedSessions(sessions)}.`,
-  ].join(" ");
+    `**Relevant listed sessions**\n${formatRecommendedSessions(sessions)}`,
+  ]);
 }
 
 function uniqueSources(sources) {

@@ -74,6 +74,196 @@ function parseStreamEvent(rawEvent) {
   };
 }
 
+function parseMarkdownBlocks(content) {
+  const lines = String(content || "").split(/\r?\n/);
+  const blocks = [];
+  let paragraph = [];
+  let list = null;
+
+  function flushParagraph() {
+    if (paragraph.length === 0) return;
+    blocks.push({ type: "paragraph", text: paragraph.join(" ").trim() });
+    paragraph = [];
+  }
+
+  function flushList() {
+    if (!list) return;
+    blocks.push(list);
+    list = null;
+  }
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      blocks.push({
+        type: "heading",
+        level: heading[1].length,
+        text: heading[2].trim(),
+      });
+      continue;
+    }
+
+    const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    const listItem = unordered || ordered;
+
+    if (listItem) {
+      flushParagraph();
+      const listType = ordered ? "ordered-list" : "unordered-list";
+      if (!list || list.type !== listType) {
+        flushList();
+        list = { type: listType, items: [] };
+      }
+      list.items.push(listItem[1].trim());
+      continue;
+    }
+
+    flushList();
+    paragraph.push(line.trim());
+  }
+
+  flushParagraph();
+  flushList();
+
+  return blocks.length > 0
+    ? blocks
+    : [{ type: "paragraph", text: "Thinking..." }];
+}
+
+function splitTrailingUrlPunctuation(url) {
+  const trailing = url.match(/[.,;:!?]+$/)?.[0] || "";
+
+  return {
+    href: trailing ? url.slice(0, -trailing.length) : url,
+    trailing,
+  };
+}
+
+function parseInlineMarkdown(text) {
+  const pattern =
+    /(\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+|mailto:[^)\s]+)\)|(https?:\/\/[^\s<]+))/g;
+  const nodes = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
+    }
+
+    const key = `${match.index}-${match[0]}`;
+
+    if (match[2]) {
+      nodes.push(
+        <strong key={key} className="font-semibold text-slate-950">
+          {match[2]}
+        </strong>
+      );
+    } else if (match[3]) {
+      nodes.push(
+        <code
+          key={key}
+          className="rounded bg-slate-100 px-1 py-0.5 text-[0.92em] text-slate-800"
+        >
+          {match[3]}
+        </code>
+      );
+    } else if (match[4] && match[5]) {
+      nodes.push(
+        <a
+          key={key}
+          href={match[5]}
+          target={match[5].startsWith("http") ? "_blank" : undefined}
+          rel={match[5].startsWith("http") ? "noreferrer" : undefined}
+          className="font-medium text-emerald-700 underline decoration-emerald-300 underline-offset-2"
+        >
+          {match[4]}
+        </a>
+      );
+    } else if (match[6]) {
+      const { href, trailing } = splitTrailingUrlPunctuation(match[6]);
+      nodes.push(
+        <a
+          key={key}
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium text-emerald-700 underline decoration-emerald-300 underline-offset-2"
+        >
+          {href}
+        </a>
+      );
+      if (trailing) {
+        nodes.push(trailing);
+      }
+    }
+
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+
+  return nodes.length > 0 ? nodes : text;
+}
+
+function MarkdownContent({ content }) {
+  const blocks = parseMarkdownBlocks(content || "Thinking...");
+
+  return (
+    <div className="space-y-3 break-words text-sm leading-7">
+      {blocks.map((block, index) => {
+        if (block.type === "heading") {
+          const Heading = block.level === 1 ? "h3" : "h4";
+
+          return (
+            <Heading
+              key={`${block.type}-${index}`}
+              className="text-base font-semibold leading-6 tracking-normal text-slate-950"
+            >
+              {parseInlineMarkdown(block.text)}
+            </Heading>
+          );
+        }
+
+        if (block.type === "unordered-list" || block.type === "ordered-list") {
+          const List = block.type === "ordered-list" ? "ol" : "ul";
+
+          return (
+            <List
+              key={`${block.type}-${index}`}
+              className={`space-y-1 pl-5 ${
+                block.type === "ordered-list" ? "list-decimal" : "list-disc"
+              }`}
+            >
+              {block.items.map((item, itemIndex) => (
+                <li key={`${itemIndex}-${item}`}>
+                  {parseInlineMarkdown(item)}
+                </li>
+              ))}
+            </List>
+          );
+        }
+
+        return (
+          <p key={`${block.type}-${index}`}>
+            {parseInlineMarkdown(block.text)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 function Message({ message }) {
   const isUser = message.role === "user";
 
@@ -89,9 +279,13 @@ function Message({ message }) {
         <div className="mb-1 text-xs font-semibold uppercase tracking-wide opacity-70">
           {isUser ? "You" : "REC Assistant"}
         </div>
-        <p className="whitespace-pre-wrap text-sm leading-7">
-          {message.content || "Thinking..."}
-        </p>
+        {isUser ? (
+          <p className="whitespace-pre-wrap break-words text-sm leading-7">
+            {message.content || "Thinking..."}
+          </p>
+        ) : (
+          <MarkdownContent content={message.content} />
+        )}
         {message.sources?.length > 0 && (
           <p className="mt-3 border-t border-slate-200 pt-2 text-xs text-slate-500">
             {message.sources.length} source{message.sources.length === 1 ? "" : "s"} used
