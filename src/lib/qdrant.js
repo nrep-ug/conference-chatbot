@@ -5,6 +5,7 @@ const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || "conference_docs";
 
 export const qdrant = new QdrantClient({
   url: QDRANT_URL,
+  checkCompatibility: false,
 });
 
 export { QDRANT_COLLECTION };

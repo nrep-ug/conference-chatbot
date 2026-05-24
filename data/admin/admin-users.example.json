@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "users": [
+    {
+      "email": "admin@example.com",
+      "username": "",
+      "passwordHash": "",
+      "passwordSalt": "",
+      "passwordParams": null,
+      "role": "owner",
+      "createdAt": "",
+      "updatedAt": "",
+      "lastLoginAt": ""
+    }
+  ],
+  "loginCodes": [],
+  "sessions": []
+}

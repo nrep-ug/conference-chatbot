@@ -1,18 +1,126 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+const suggestedQuestions = [
+  "How should I prepare for the conference across the 4 days?",
+  "Which sessions are relevant to finance and investment?",
+  "What renewable energy technologies may be discussed?",
+  "What happens on Day 3?",
+];
+
+const capabilityItems = [
+  "Programme sessions",
+  "Venue and halls",
+  "Sponsors and partners",
+  "Practical preparation",
+];
+
+function Icon({ name, className = "" }) {
+  const props = {
+    className,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": true,
+  };
+  const paths = {
+    send: (
+      <>
+        <path d="m4 11.5 15-7-7 15-2.5-6L4 11.5Z" />
+        <path d="m19 4.5-9.5 9" />
+      </>
+    ),
+    spark: (
+      <>
+        <path d="m12 3 1.5 5L19 9.5 13.5 11 12 17l-1.5-6L5 9.5 10.5 8 12 3Z" />
+        <path d="M19 17v4" />
+        <path d="M17 19h4" />
+      </>
+    ),
+    calendar: (
+      <>
+        <rect x="4" y="5" width="16" height="15" rx="2" />
+        <path d="M8 3v4" />
+        <path d="M16 3v4" />
+        <path d="M4 10h16" />
+      </>
+    ),
+    map: (
+      <>
+        <path d="M9 18 4 20V6l5-2 6 2 5-2v14l-5 2-6-2Z" />
+        <path d="M9 4v14" />
+        <path d="M15 6v14" />
+      </>
+    ),
+  };
+
+  return <svg {...props}>{paths[name]}</svg>;
+}
+
+function parseStreamEvent(rawEvent) {
+  const lines = rawEvent.split("\n");
+  const eventType =
+    lines.find((line) => line.startsWith("event: "))?.slice(7) || "message";
+  const dataLine = lines.find((line) => line.startsWith("data: "));
+  if (!dataLine) return null;
+
+  return {
+    eventType,
+    data: JSON.parse(dataLine.slice(6)),
+  };
+}
+
+function Message({ message }) {
+  const isUser = message.role === "user";
+
+  return (
+    <article className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+      <div
+        className={`max-w-[88%] rounded-lg px-4 py-3 shadow-sm sm:max-w-[78%] ${
+          isUser
+            ? "bg-slate-950 text-white"
+            : "border border-slate-200 bg-white text-slate-900"
+        }`}
+      >
+        <div className="mb-1 text-xs font-semibold uppercase tracking-wide opacity-70">
+          {isUser ? "You" : "REC Assistant"}
+        </div>
+        <p className="whitespace-pre-wrap text-sm leading-7">
+          {message.content || "Thinking..."}
+        </p>
+        {message.sources?.length > 0 && (
+          <p className="mt-3 border-t border-slate-200 pt-2 text-xs text-slate-500">
+            {message.sources.length} source{message.sources.length === 1 ? "" : "s"} used
+          </p>
+        )}
+      </div>
+    </article>
+  );
+}
 
 export default function Home() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const transcriptRef = useRef(null);
 
-  async function askQuestion(event) {
-    event.preventDefault();
+  useEffect(() => {
+    transcriptRef.current?.scrollTo({
+      top: transcriptRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [messages]);
 
-    if (!question.trim()) return;
+  async function askQuestion(event, presetQuestion) {
+    event?.preventDefault();
 
-    const userQuestion = question;
+    const userQuestion = (presetQuestion || question).trim();
+    if (!userQuestion || loading) return;
+
     const assistantMessageId = crypto.randomUUID();
     setQuestion("");
     setLoading(true);
@@ -20,7 +128,12 @@ export default function Home() {
     setMessages((previous) => [
       ...previous,
       { id: crypto.randomUUID(), role: "user", content: userQuestion },
-      { id: assistantMessageId, role: "assistant", content: "" },
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        content: "",
+        sources: [],
+      },
     ]);
 
     try {
@@ -54,8 +167,8 @@ export default function Home() {
         const events = buffer.split("\n\n");
         buffer = events.pop() || "";
 
-        for (const event of events) {
-          handleStreamEvent(event, assistantMessageId);
+        for (const rawEvent of events) {
+          handleStreamEvent(rawEvent, assistantMessageId);
         }
       }
 
@@ -66,7 +179,7 @@ export default function Home() {
       updateAssistantMessage(
         assistantMessageId,
         error.message || "Something went wrong while contacting the chatbot.",
-        true
+        { replace: true, error: true }
       );
     } finally {
       setLoading(false);
@@ -74,30 +187,39 @@ export default function Home() {
   }
 
   function handleStreamEvent(rawEvent, assistantMessageId) {
-    const lines = rawEvent.split("\n");
-    const eventType =
-      lines.find((line) => line.startsWith("event: "))?.slice(7) || "message";
-    const dataLine = lines.find((line) => line.startsWith("data: "));
-    if (!dataLine) return;
+    const parsed = parseStreamEvent(rawEvent);
+    if (!parsed) return;
 
-    const data = JSON.parse(dataLine.slice(6));
-
-    if (eventType === "token") {
-      updateAssistantMessage(assistantMessageId, data);
+    if (parsed.eventType === "token") {
+      updateAssistantMessage(assistantMessageId, parsed.data);
     }
 
-    if (eventType === "error") {
-      updateAssistantMessage(assistantMessageId, data.error, true);
+    if (parsed.eventType === "sources") {
+      setMessages((previous) =>
+        previous.map((message) =>
+          message.id === assistantMessageId
+            ? { ...message, sources: parsed.data || [] }
+            : message
+        )
+      );
+    }
+
+    if (parsed.eventType === "error") {
+      updateAssistantMessage(assistantMessageId, parsed.data.error, {
+        replace: true,
+        error: true,
+      });
     }
   }
 
-  function updateAssistantMessage(messageId, content, replace = false) {
+  function updateAssistantMessage(messageId, content, options = {}) {
     setMessages((previous) =>
       previous.map((message) =>
         message.id === messageId
           ? {
               ...message,
-              content: replace ? content : message.content + content,
+              error: options.error || message.error,
+              content: options.replace ? content : message.content + content,
             }
           : message
       )
@@ -105,61 +227,164 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-gray-100 p-6">
-      <section className="mx-auto max-w-3xl rounded-2xl bg-white p-6 shadow">
-        <h1 className="text-2xl font-bold">Conference Chatbot</h1>
-        <p className="mt-2 text-gray-600">
-          Ask about the conference program, venue, registration, exhibitors, and FAQs.
-        </p>
+    <main className="min-h-screen bg-slate-100 text-slate-950">
+      <div className="mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-4 sm:px-6 lg:px-8">
+        <header className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white px-5 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-md bg-emerald-400 text-slate-950">
+              <Icon name="spark" className="h-5 w-5" />
+            </div>
+            <div>
+              <h1 className="text-lg font-semibold tracking-normal">
+                REC26 & EXPO Assistant
+              </h1>
+              <p className="text-sm text-slate-500">
+                Public conference guidance grounded in the active programme
+              </p>
+            </div>
+          </div>
+          <a
+            href="/admin"
+            className="inline-flex items-center justify-center rounded-md border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            Admin
+          </a>
+        </header>
 
-        <div className="mt-6 min-h-[350px] rounded-xl border bg-gray-50 p-4">
-          {messages.length === 0 && (
-            <p className="text-gray-500">
-              Try asking: Where will the conference take place?
-            </p>
-          )}
-
-          {messages.map((message) => (
-            <div
-              key={message.id}
-              className={`mb-4 ${
-                message.role === "user" ? "text-right" : "text-left"
-              }`}
-            >
-              <div
-                className={`inline-block max-w-[85%] rounded-xl px-4 py-3 ${
-                  message.role === "user"
-                    ? "bg-black text-white"
-                    : "bg-white text-gray-900 border"
-                }`}
-              >
-                <strong>{message.role === "user" ? "You" : "Bot"}</strong>
-                <p className="mt-1 whitespace-pre-wrap">
-                  {message.content || "Thinking..."}
-                </p>
+        <section className="mt-4 grid flex-1 gap-4 lg:grid-cols-[320px_1fr]">
+          <aside className="rounded-lg border border-slate-200 bg-slate-950 p-5 text-white shadow-sm">
+            <div>
+              <p className="text-sm font-medium text-emerald-300">Active event</p>
+              <h2 className="mt-2 text-2xl font-semibold leading-tight tracking-normal">
+                Renewable Energy Conference & Expo 2026
+              </h2>
+            </div>
+            <div className="mt-6 space-y-3">
+              <div className="flex gap-3 rounded-md bg-white/[0.06] p-4">
+                <Icon name="calendar" className="mt-0.5 h-5 w-5 text-emerald-300" />
+                <div>
+                  <p className="text-sm font-semibold">19-22 October 2026</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-400">
+                    Four days spanning policy, technology, implementation, and
+                    regional scale.
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-3 rounded-md bg-white/[0.06] p-4">
+                <Icon name="map" className="mt-0.5 h-5 w-5 text-emerald-300" />
+                <div>
+                  <p className="text-sm font-semibold">Kampala Serena Hotel</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-400">
+                    Kampala, Uganda
+                  </p>
+                </div>
               </div>
             </div>
-          ))}
 
-          {loading && <p className="text-gray-500">Responding...</p>}
-        </div>
+            <div className="mt-6">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                Can help with
+              </p>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {capabilityItems.map((item) => (
+                  <div
+                    key={item}
+                    className="rounded-md border border-white/10 px-3 py-2 text-xs text-slate-300"
+                  >
+                    {item}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </aside>
 
-        <form onSubmit={askQuestion} className="mt-4 flex gap-2">
-          <input
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            placeholder="Ask about the conference..."
-            className="flex-1 rounded-xl border px-4 py-3 outline-none focus:ring-2 focus:ring-black"
-          />
-          <button
-            type="submit"
-            disabled={loading}
-            className="rounded-xl bg-black px-5 py-3 font-medium text-white disabled:cursor-not-allowed disabled:bg-gray-400"
-          >
-            {loading ? "..." : "Ask"}
-          </button>
-        </form>
-      </section>
+          <section className="flex min-h-[680px] flex-col rounded-lg border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-200 px-5 py-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-base font-semibold">Conversation</h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Ask about sessions, planning, logistics, sponsors, and
+                    practical preparation.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setMessages([])}
+                  className="rounded-md border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <div
+              ref={transcriptRef}
+              className="flex-1 space-y-4 overflow-y-auto bg-slate-50 px-4 py-5 sm:px-6"
+            >
+              {messages.length === 0 ? (
+                <div className="grid min-h-full place-items-center">
+                  <div className="max-w-2xl text-center">
+                    <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-slate-950 text-white">
+                      <Icon name="spark" className="h-5 w-5" />
+                    </div>
+                    <h3 className="mt-5 text-2xl font-semibold tracking-normal">
+                      Start with the outcome you want
+                    </h3>
+                    <p className="mt-3 text-sm leading-7 text-slate-500">
+                      The assistant can answer direct conference facts and also
+                      give practical planning guidance when grounded in the
+                      published programme.
+                    </p>
+                    <div className="mt-6 grid gap-2 sm:grid-cols-2">
+                      {suggestedQuestions.map((item) => (
+                        <button
+                          key={item}
+                          type="button"
+                          onClick={(event) => askQuestion(event, item)}
+                          className="rounded-md border border-slate-200 bg-white px-4 py-3 text-left text-sm font-medium leading-6 text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+                        >
+                          {item}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                messages.map((message) => <Message key={message.id} message={message} />)
+              )}
+            </div>
+
+            <form
+              onSubmit={askQuestion}
+              className="border-t border-slate-200 bg-white p-4"
+            >
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <textarea
+                  value={question}
+                  onChange={(event) => setQuestion(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      askQuestion(event);
+                    }
+                  }}
+                  placeholder="Ask about the conference..."
+                  rows={2}
+                  className="min-h-14 flex-1 resize-none rounded-md border border-slate-300 px-4 py-3 text-sm leading-6 outline-none transition focus:border-slate-950 focus:ring-4 focus:ring-slate-200"
+                />
+                <button
+                  type="submit"
+                  disabled={loading || !question.trim()}
+                  className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400 sm:w-36"
+                >
+                  <Icon name="send" className="h-4 w-4" />
+                  {loading ? "Sending" : "Ask"}
+                </button>
+              </div>
+            </form>
+          </section>
+        </section>
+      </div>
     </main>
   );
 }

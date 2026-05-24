@@ -55,6 +55,19 @@ REC_SNAPSHOT_ENABLED=true
 REC_SNAPSHOT_STRICT=false
 REC_REFRESH_TOKEN=
 
+ADMIN_AUTH_FILE=data/admin/admin-users.json
+ADMIN_AUTH_SECRET=
+ADMIN_SESSION_TTL_MS=604800000
+ADMIN_LOGIN_CODE_TTL_MS=600000
+
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_STARTTLS=true
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_FROM=
+
 CHAT_MODEL=command-r
 PLANNER_MODEL=command-r
 EMBED_MODEL=nomic-embed-text
@@ -137,6 +150,44 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+## Admin Console
+
+The admin console is available at `/admin`.
+
+It provides:
+
+- secure setup for allowed admin emails
+- email verification codes over SMTP
+- client-side password digest before transport plus server-side `scrypt` storage in JSON
+- HttpOnly session cookies
+- snapshot refresh and optional Qdrant rebuild controls
+- runtime status for models, Qdrant, SMTP, and generated REC data
+
+Runtime account data is stored in `data/admin/admin-users.json`, which is ignored by git. The tracked seed file is `data/admin/admin-users.example.json`.
+
+Before first production use:
+
+```bash
+cp data/admin/admin-users.example.json data/admin/admin-users.json
+```
+
+Then edit `data/admin/admin-users.json` and replace `admin@example.com` with the allowed admin email address. Keep `username`, `passwordHash`, and other account fields empty. The allowed user will complete setup from `/admin` after receiving an SMTP verification code.
+
+Set these values in `.env.local`:
+
+```bash
+ADMIN_AUTH_SECRET=<long-random-secret>
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_STARTTLS=true
+SMTP_USER=bot@example.com
+SMTP_PASSWORD=<smtp-password>
+SMTP_FROM=bot@example.com
+```
+
+`ADMIN_AUTH_SECRET` signs login codes and session tokens. If it is missing, the app falls back to other server secrets or a per-process secret, which can invalidate sessions after restart.
+
 ## Conference Data
 
 The source of truth is the `HR` Appwrite database:
@@ -190,6 +241,8 @@ curl -X POST "https://your-domain.example/api/admin/rec-data/refresh" \
 ```
 
 Set `"rebuildQdrant":true` only when you also want the API call to rebuild the vector collection. That can take longer because it calls the embedding model for every generated document.
+
+Authenticated admins can also refresh the same data from `/admin` without using the token endpoint.
 
 The chat route uses this order:
 
@@ -320,7 +373,7 @@ location /api/chat {
 
 If answers are slow:
 
-- confirm `CHAT_MODEL=gemma2:2b`
+- confirm `CHAT_MODEL=command-r`
 - confirm `PLANNER_MODEL` is pulled if it differs from `CHAT_MODEL`
 - confirm the model is already pulled with `ollama list`
 - keep `CHAT_KEEP_ALIVE=30m` or higher
@@ -340,6 +393,13 @@ If the refresh API returns `401`:
 
 - confirm `REC_REFRESH_TOKEN` is set in `.env.local`
 - pass it as `Authorization: Bearer <token>` or `x-rec-refresh-token`
+
+If admin verification email fails:
+
+- confirm `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM`
+- use `SMTP_SECURE=true` for SMTPS on port `465`
+- use `SMTP_SECURE=false` and `SMTP_STARTTLS=true` for most port `587` SMTP providers
+- confirm the allowed email exists in `data/admin/admin-users.json`
 
 If PM2 fails to start:
 

@@ -48,6 +48,9 @@ qdrant_storage/
 data/generated/*
 !data/generated/.gitkeep
 
+# runtime admin auth store
+data/admin/admin-users.json
+
 # logs
 logs/
 *.log*
