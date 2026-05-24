@@ -443,23 +443,78 @@ function answerSpecificSession(session, normalized) {
   ]);
 }
 
+const DAY_WORDS = {
+  one: 1,
+  first: 1,
+  two: 2,
+  second: 2,
+  three: 3,
+  third: 3,
+  four: 4,
+  fourth: 4,
+};
+
+const DAY_TOKEN_PATTERN =
+  "\\d+|one|first|two|second|three|third|four|fourth";
+
+function parseDayToken(value) {
+  const token = String(value || "").trim().toLowerCase();
+  const numeric = Number.parseInt(token, 10);
+  const day = Number.isFinite(numeric) ? numeric : DAY_WORDS[token];
+
+  return Number.isFinite(day) && day > 0 ? day : null;
+}
+
+function addUniqueDay(days, day) {
+  if (!day || days.includes(day)) return;
+  days.push(day);
+}
+
+function extractRequestedDays(normalized) {
+  const days = [];
+  const rangePattern = new RegExp(
+    `\\b(?:from\\s+)?days?\\s*(${DAY_TOKEN_PATTERN})\\s*(?:to|through|until|-|–|—)\\s*(?:days?\\s*)?(${DAY_TOKEN_PATTERN})\\b`,
+    "g"
+  );
+  const listPattern = new RegExp(
+    `\\bdays?\\s+((?:${DAY_TOKEN_PATTERN})(?:\\s*(?:,\\s*(?:and\\s+)?|and\\s+|&\\s*)(?:${DAY_TOKEN_PATTERN}))*)`,
+    "g"
+  );
+  const repeatedDayPattern = new RegExp(
+    `\\bday\\s*(${DAY_TOKEN_PATTERN})\\b`,
+    "g"
+  );
+  const tokenPattern = new RegExp(DAY_TOKEN_PATTERN, "g");
+  let match;
+
+  while ((match = rangePattern.exec(normalized)) !== null) {
+    const start = parseDayToken(match[1]);
+    const end = parseDayToken(match[2]);
+    if (!start || !end) continue;
+
+    const min = Math.min(start, end);
+    const max = Math.max(start, end);
+    for (let day = min; day <= max; day += 1) {
+      addUniqueDay(days, day);
+    }
+  }
+
+  while ((match = listPattern.exec(normalized)) !== null) {
+    const tokens = match[1].match(tokenPattern) || [];
+    for (const token of tokens) {
+      addUniqueDay(days, parseDayToken(token));
+    }
+  }
+
+  while ((match = repeatedDayPattern.exec(normalized)) !== null) {
+    addUniqueDay(days, parseDayToken(match[1]));
+  }
+
+  return days.sort((a, b) => a - b);
+}
+
 function extractRequestedDay(normalized) {
-  const numericMatch = normalized.match(/\bday\s*(\d+)\b/);
-  if (numericMatch) return Number.parseInt(numericMatch[1], 10);
-
-  const wordDays = {
-    one: 1,
-    first: 1,
-    two: 2,
-    second: 2,
-    three: 3,
-    third: 3,
-    four: 4,
-    fourth: 4,
-  };
-  const wordMatch = normalized.match(/\bday\s+(one|first|two|second|three|third|four|fourth)\b/);
-
-  return wordMatch ? wordDays[wordMatch[1]] : null;
+  return extractRequestedDays(normalized)[0] || null;
 }
 
 function answerDaySchedule(day, snapshot) {
@@ -765,14 +820,58 @@ function answerProgramOverview(snapshot) {
   ]);
 }
 
-function answerSessionsOverview(snapshot, requestedDay) {
+function isAllSessionsListQuestion(normalized) {
+  return (
+    /\bsessions?\b/.test(normalized) &&
+    /\b(all|every|complete|full|list|show|give|get)\b/.test(normalized) &&
+    !/(recommend|attend|relevant|related|connected|mention|mentions|about|finance|financial|investment|policy|government|developer|technology|technologies|cooking|biofuel|geothermal|nuclear|productive use|efficiency)/.test(
+      normalized
+    )
+  );
+}
+
+function normalizeRequestedDays(value) {
+  const days = Array.isArray(value)
+    ? value
+    : Number.isFinite(Number(value))
+      ? [Number(value)]
+      : [];
+
+  return [...new Set(days.filter((day) => Number.isFinite(day) && day > 0))].sort(
+    (a, b) => a - b
+  );
+}
+
+function formatRequestedDays(days) {
+  if (days.length === 0) return "";
+  if (days.length === 1) return `Day ${days[0]}`;
+
+  const isConsecutive = days.every(
+    (day, index) => index === 0 || day === days[index - 1] + 1
+  );
+
+  if (isConsecutive) {
+    return `Days ${days[0]}-${days[days.length - 1]}`;
+  }
+
+  return `Days ${days.slice(0, -1).join(", ")} and ${days.at(-1)}`;
+}
+
+function getSessionsForDays(snapshot, days) {
+  return snapshot.sessions.filter(
+    (session) => days.length === 0 || days.includes(session.day)
+  );
+}
+
+function answerSessionsOverview(snapshot, requestedDays, options = {}) {
+  const selectedDays = normalizeRequestedDays(requestedDays);
   const sessions = snapshot.sessions
-    .filter((session) => !requestedDay || session.day === requestedDay)
+    .filter((session) => selectedDays.length === 0 || selectedDays.includes(session.day))
     .sort((a, b) => a.day - b.day || new Date(a.startTime) - new Date(b.startTime));
 
   if (sessions.length === 0) {
-    return requestedDay
-      ? `I could not find sessions listed for Day ${requestedDay}.`
+    return selectedDays.length > 0
+      ? `I could not find sessions listed for ${formatRequestedDays(selectedDays)}.`
       : "I could not find listed sessions in the conference materials.";
   }
 
@@ -785,17 +884,18 @@ function answerSessionsOverview(snapshot, requestedDay) {
 
   const daySummaries = [...byDay.entries()]
     .map(([day, daySessions]) => {
-      const titles = daySessions
-        .slice(0, 4)
-        .map((session) =>
+      const visibleSessions = options.includeAll || selectedDays.length > 0
+        ? daySessions
+        : daySessions.slice(0, 4);
+      const titles = visibleSessions.map((session) =>
           compact([
             session.title,
             session.venueHall ? `(${session.venueHall})` : null,
           ]).join(" ")
         );
       const remaining =
-        daySessions.length > 4
-          ? `Plus ${daySessions.length - 4} more listed session${daySessions.length - 4 === 1 ? "" : "s"}.`
+        !options.includeAll && daySessions.length > visibleSessions.length
+          ? `Plus ${daySessions.length - visibleSessions.length} more listed session${daySessions.length - visibleSessions.length === 1 ? "" : "s"}.`
           : "";
 
       return joinMarkdownSections([
@@ -806,8 +906,8 @@ function answerSessionsOverview(snapshot, requestedDay) {
     })
     .join("\n\n");
 
-  const prefix = requestedDay
-    ? `Yes. I found ${sessions.length} listed session${sessions.length === 1 ? "" : "s"} for Day ${requestedDay}.`
+  const prefix = selectedDays.length > 0
+    ? `Yes. I found ${sessions.length} listed session${sessions.length === 1 ? "" : "s"} for ${formatRequestedDays(selectedDays)}.`
     : `Yes. I found ${sessions.length} listed programme session${sessions.length === 1 ? "" : "s"} across the active conference.`;
 
   return joinMarkdownSections([prefix, daySummaries]);
@@ -1943,7 +2043,8 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
   const compoundSources = [...sources];
   const conference = snapshot.conference;
   const dayThemeMatch = getDayThemeMatch(normalized, snapshot);
-  const requestedDay = extractRequestedDay(normalized);
+  const requestedDays = extractRequestedDays(normalized);
+  const requestedDay = requestedDays[0] || null;
   const requestedHall = findRequestedHall(normalized, snapshot);
   const mentionedSession = findMentionedSession(normalized, snapshot.sessions);
   const ceremonyBlock = findCeremonyBlock(snapshot, normalized);
@@ -1972,6 +2073,7 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     (/\b(program|programme|agenda)\b/.test(normalized) &&
       /(overview|summary|more|about|tell|give|what)/.test(normalized));
   const wantsConferenceOverview = isConferenceOverviewQuestion(normalized);
+  const wantsAllSessionsList = isAllSessionsListQuestion(normalized);
 
   function addPart(answer, partSources = []) {
     if (!answer) return;
@@ -2004,12 +2106,19 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     );
   }
 
-  if (isGenericSessionsOverviewQuestion(normalized)) {
+  if (wantsAllSessionsList || isGenericSessionsOverviewQuestion(normalized)) {
+    const overviewSessions = getSessionsForDays(snapshot, requestedDays);
     addPart(
-      answerSessionsOverview(snapshot, requestedDay),
-      snapshot.sessions
-        .filter((session) => !requestedDay || session.day === requestedDay)
-        .slice(0, 8)
+      answerSessionsOverview(snapshot, requestedDays, {
+        includeAll: wantsAllSessionsList || requestedDays.length > 0,
+      }),
+      overviewSessions
+        .slice(
+          0,
+          wantsAllSessionsList || requestedDays.length > 0
+            ? overviewSessions.length
+            : 8
+        )
         .map((session) => sourceFor("session", session, session.title))
     );
   }
@@ -2392,11 +2501,13 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   const conference = snapshot.conference;
   const sources = [sourceFor("conference_overview", conference, conference.title)];
   const mentionedSponsor = findMentionedSponsor(normalized, snapshot.sponsors);
-  const requestedDay = extractRequestedDay(normalized);
+  const requestedDays = extractRequestedDays(normalized);
+  const requestedDay = requestedDays[0] || null;
   const mentionedSession = findMentionedSession(normalized, snapshot.sessions);
   const requestedHall = findRequestedHall(normalized, snapshot);
   const dayThemeMatch = getDayThemeMatch(normalized, snapshot);
   const compoundAnswer = getCompoundDirectAnswer(normalized, snapshot, sources);
+  const wantsAllSessionsList = isAllSessionsListQuestion(normalized);
 
   if (compoundAnswer) {
     return compoundAnswer;
@@ -2412,14 +2523,21 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     };
   }
 
-  if (isGenericSessionsOverviewQuestion(normalized)) {
+  if (wantsAllSessionsList || isGenericSessionsOverviewQuestion(normalized)) {
+    const overviewSessions = getSessionsForDays(snapshot, requestedDays);
     return {
-      answer: answerSessionsOverview(snapshot, requestedDay),
+      answer: answerSessionsOverview(snapshot, requestedDays, {
+        includeAll: wantsAllSessionsList || requestedDays.length > 0,
+      }),
       sources: [
         sourceFor("conference_overview", conference, conference.title),
-        ...snapshot.sessions
-          .filter((session) => !requestedDay || session.day === requestedDay)
-          .slice(0, 8)
+        ...overviewSessions
+          .slice(
+            0,
+            wantsAllSessionsList || requestedDays.length > 0
+              ? overviewSessions.length
+              : 8
+          )
           .map((session) => sourceFor("session", session, session.title)),
       ],
     };
@@ -2902,13 +3020,20 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     ) &&
     !isFilteredSessionQuestion(normalized)
   ) {
+    const overviewSessions = getSessionsForDays(snapshot, requestedDays);
     return {
-      answer: answerSessionsOverview(snapshot, requestedDay),
+      answer: answerSessionsOverview(snapshot, requestedDays, {
+        includeAll: wantsAllSessionsList || requestedDays.length > 0,
+      }),
       sources: [
         sourceFor("conference_overview", conference, conference.title),
-        ...snapshot.sessions
-          .filter((session) => !requestedDay || session.day === requestedDay)
-          .slice(0, 8)
+        ...overviewSessions
+          .slice(
+            0,
+            wantsAllSessionsList || requestedDays.length > 0
+              ? overviewSessions.length
+              : 8
+          )
           .map((session) => sourceFor("session", session, session.title)),
       ],
     };

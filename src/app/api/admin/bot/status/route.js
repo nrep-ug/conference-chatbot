@@ -19,6 +19,8 @@ function publicRuntimeSettings() {
     plannerModel: process.env.PLANNER_MODEL || process.env.CHAT_MODEL || "mistral",
     embedModel: process.env.EMBED_MODEL || "nomic-embed-text-v2-moe",
     plannerEnabled: booleanEnv("PLANNER_ENABLED"),
+    recFullContextEnabled: booleanEnv("REC_FULL_CONTEXT_ENABLED"),
+    recFullContextMode: process.env.REC_FULL_CONTEXT_MODE || "fallback",
     qdrantComplementEnabled: booleanEnv("QDRANT_COMPLEMENT_ENABLED"),
     qdrantComplementMode: process.env.QDRANT_COMPLEMENT_MODE || "append",
     qdrantFullContextEnabled: booleanEnv("QDRANT_FULL_CONTEXT_ENABLED"),

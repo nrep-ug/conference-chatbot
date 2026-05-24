@@ -3,8 +3,13 @@ import { randomUUID } from "node:crypto";
 import { logChatEvent } from "@/lib/chat-diagnostics";
 import { getEmbedding, askMistral, streamMistral } from "@/lib/ollama";
 import { qdrant, QDRANT_COLLECTION } from "@/lib/qdrant";
-import { getDirectRecAnswer } from "@/lib/rec-data";
+import {
+  buildRecDocuments,
+  getDirectRecAnswer,
+  getRecPublicSnapshot,
+} from "@/lib/rec-data";
 import { retrievePlannedRecContext } from "@/lib/rec-planner";
+import { getPlannerSchemaMarkdown } from "@/lib/rec-schema";
 
 export const runtime = "nodejs";
 
@@ -49,6 +54,18 @@ const QDRANT_FULL_CONTEXT_MAX_CHARS = readInteger(
 const QDRANT_FULL_CONTEXT_SCROLL_LIMIT = readInteger(
   "QDRANT_FULL_CONTEXT_SCROLL_LIMIT",
   128
+);
+const REC_FULL_CONTEXT_ENABLED = readBoolean("REC_FULL_CONTEXT_ENABLED", true);
+const REC_FULL_CONTEXT_MODE = (process.env.REC_FULL_CONTEXT_MODE || "fallback")
+  .trim()
+  .toLowerCase();
+const REC_FULL_CONTEXT_MAX_CHARS = readInteger(
+  "REC_FULL_CONTEXT_MAX_CHARS",
+  18000
+);
+const REC_FULL_CONTEXT_SCHEMA_MAX_CHARS = readInteger(
+  "REC_FULL_CONTEXT_SCHEMA_MAX_CHARS",
+  6000
 );
 const answerCache = new Map();
 const CHATBOT_HELP_ANSWER = [
@@ -243,6 +260,134 @@ function shouldUseFullQdrantContext(question) {
       normalized
     )
   );
+}
+
+function isBroadSynthesisQuestion(question) {
+  const normalized = normalizeQuestion(question);
+
+  return (
+    /\b(in depth|in-depth|deep dive|detailed|comprehensive|full view|complete view|overview|summary)\b/.test(
+      normalized
+    ) ||
+    /\btell me more\b/.test(normalized) ||
+    /\b(across|over)\s+(the\s+)?(4|four)\s+days\b/.test(normalized) ||
+    /\b(prepare|preparation|get ready|planning|make the most)\b/.test(
+      normalized
+    ) ||
+    /\b(recommend|guide|what should|prioritize|prioritise|new to|beginner|learn|expect)\b/.test(
+      normalized
+    )
+  );
+}
+
+function shouldUseFullRecContext(question) {
+  if (!REC_FULL_CONTEXT_ENABLED) return false;
+  if (REC_FULL_CONTEXT_MODE === "broad") return isBroadSynthesisQuestion(question);
+
+  return true;
+}
+
+function formatRecDocument(document) {
+  const payload = document.payload || {};
+
+  return [
+    `Source type: ${payload.sourceType || "unknown"}`,
+    `Source: ${payload.source || payload.title || document.id}`,
+    payload.tableId ? `Table ID: ${payload.tableId}` : null,
+    payload.rowId ? `Row ID: ${payload.rowId}` : null,
+    document.text,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatFullRecContext(documents, maxContextChars) {
+  let remaining = maxContextChars;
+  const chunks = [];
+
+  for (const document of documents) {
+    if (remaining <= 0) break;
+
+    const chunk = formatRecDocument(document).trim();
+    if (!chunk) continue;
+
+    chunks.push(chunk.slice(0, remaining));
+    remaining -= chunk.length;
+  }
+
+  return chunks.join("\n\n---\n\n");
+}
+
+function sourcesFromRecDocuments(documents) {
+  return documents.map((document) => ({
+    source: document.payload?.source,
+    sourceType: document.payload?.sourceType,
+    tableId: document.payload?.tableId,
+    rowId: document.payload?.rowId,
+    score: 1,
+  }));
+}
+
+async function retrieveFullRecContext(question, signal, requestId) {
+  if (!shouldUseFullRecContext(question)) {
+    return { confident: false, context: "", sources: [] };
+  }
+
+  const startedAt = Date.now();
+
+  try {
+    const snapshot = await getRecPublicSnapshot({ signal });
+    const documents = buildRecDocuments(snapshot);
+    const schema = getPlannerSchemaMarkdown().slice(
+      0,
+      REC_FULL_CONTEXT_SCHEMA_MAX_CHARS
+    );
+    const dataContext = formatFullRecContext(
+      documents,
+      REC_FULL_CONTEXT_MAX_CHARS
+    );
+
+    if (!dataContext.trim()) {
+      logChatEvent("full_rec_context_empty", {
+        requestId,
+        durationMs: Date.now() - startedAt,
+      });
+
+      return { confident: false, context: "", sources: [] };
+    }
+
+    const context = [
+      "PUBLIC REC26 DATABASE SCHEMA:",
+      schema,
+      "",
+      "COMPLETE PUBLIC ACTIVE-CONFERENCE DATA SNAPSHOT:",
+      dataContext,
+      "",
+      "Use the schema to understand table relationships and the data snapshot as the source of official facts. The snapshot contains only public data for the active conference.",
+    ].join("\n");
+
+    logChatEvent("full_rec_context_loaded", {
+      requestId,
+      durationMs: Date.now() - startedAt,
+      sourceCount: documents.length,
+      contextChars: context.length,
+      mode: REC_FULL_CONTEXT_MODE,
+    });
+
+    return {
+      confident: true,
+      context,
+      sources: sourcesFromRecDocuments(documents),
+    };
+  } catch (error) {
+    logChatEvent("full_rec_context_error", {
+      requestId,
+      durationMs: Date.now() - startedAt,
+      error: error.message,
+    });
+
+    return { confident: false, context: "", sources: [] };
+  }
 }
 
 async function retrieveFullQdrantContext(question, requestId) {
@@ -534,6 +679,31 @@ async function answerQuestion(question, signal, requestId) {
     return payload;
   }
 
+  const fullRecContext = await retrieveFullRecContext(question, signal, requestId);
+
+  if (fullRecContext.confident) {
+    const answerStartedAt = Date.now();
+    const answer = await askMistral({
+      question,
+      context: fullRecContext.context,
+      signal,
+    });
+    const payload = {
+      answer,
+      sources: fullRecContext.sources,
+    };
+
+    setCachedAnswer(question, payload);
+    logChatEvent("answer_full_rec_context", {
+      requestId,
+      durationMs: Date.now() - startedAt,
+      answerModelMs: Date.now() - answerStartedAt,
+      sourceCount: fullRecContext.sources.length,
+      contextChars: fullRecContext.context.length,
+    });
+    return payload;
+  }
+
   const fullQdrantContext = await retrieveFullQdrantContext(question, requestId);
 
   if (fullQdrantContext.confident) {
@@ -624,6 +794,16 @@ function writeEvent(controller, encoder, event, data) {
   );
 }
 
+function getClientErrorMessage(error) {
+  const message = error?.message || "";
+
+  if (/\b(Chat|Planner|Embedding) failed\b/i.test(message)) {
+    return "The conference data lookup is available, but the local AI model service is not ready. Please check that Ollama is running and that the configured chat/planner/embed models are installed on the server.";
+  }
+
+  return "The chatbot failed to process the question.";
+}
+
 function streamAnswer(question, signal, requestId) {
   const encoder = new TextEncoder();
 
@@ -684,6 +864,40 @@ function streamAnswer(question, signal, requestId) {
               durationMs: Date.now() - startedAt,
               sourceCount: payload.sources?.length || 0,
               complemented: Boolean(complementedAnswer),
+            });
+            controller.close();
+            return;
+          }
+
+          const fullRecContext = await retrieveFullRecContext(
+            question,
+            signal,
+            requestId
+          );
+
+          if (fullRecContext.confident) {
+            writeEvent(controller, encoder, "sources", fullRecContext.sources);
+
+            const answerStartedAt = Date.now();
+            const answer = await streamMistral({
+              question,
+              context: fullRecContext.context,
+              signal,
+              onToken: (token) =>
+                writeEvent(controller, encoder, "token", token),
+            });
+
+            setCachedAnswer(question, {
+              answer,
+              sources: fullRecContext.sources,
+            });
+            writeEvent(controller, encoder, "done", { cached: false });
+            logChatEvent("stream_full_rec_context", {
+              requestId,
+              durationMs: Date.now() - startedAt,
+              answerModelMs: Date.now() - answerStartedAt,
+              sourceCount: fullRecContext.sources.length,
+              contextChars: fullRecContext.context.length,
             });
             controller.close();
             return;
@@ -805,7 +1019,7 @@ function streamAnswer(question, signal, requestId) {
             error: error.message,
           });
           writeEvent(controller, encoder, "error", {
-            error: "The chatbot failed to process the question.",
+            error: getClientErrorMessage(error),
           });
           controller.close();
         }
@@ -869,7 +1083,7 @@ export async function POST(request) {
     });
 
     return Response.json(
-      { error: "The chatbot failed to process the question." },
+      { error: getClientErrorMessage(error) },
       { status: 500 }
     );
   }

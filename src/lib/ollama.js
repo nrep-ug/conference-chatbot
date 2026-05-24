@@ -62,6 +62,28 @@ function buildPlannerOptions() {
   return options;
 }
 
+async function readOllamaError(response) {
+  const body = await response.text().catch(() => "");
+  if (!body) return "";
+
+  try {
+    const data = JSON.parse(body);
+    return data.error || data.message || body;
+  } catch {
+    return body;
+  }
+}
+
+async function throwOllamaError(response, label, model) {
+  const detail = await readOllamaError(response);
+  const modelText = model ? ` for model "${model}"` : "";
+  const detailText = detail ? ` - ${detail}` : "";
+
+  throw new Error(
+    `${label} failed${modelText}: ${response.status} ${response.statusText}${detailText}`
+  );
+}
+
 function createRequestSignal(parentSignal) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
@@ -174,7 +196,7 @@ export async function getEmbedding(text, { signal } = {}) {
     });
 
     if (!response.ok) {
-      throw new Error(`Embedding failed: ${response.statusText}`);
+      await throwOllamaError(response, "Embedding", EMBED_MODEL);
     }
 
     const data = await response.json();
@@ -209,7 +231,7 @@ export async function askPlanner({ question, schema, signal }) {
     });
 
     if (!response.ok) {
-      throw new Error(`Planner failed: ${response.statusText}`);
+      await throwOllamaError(response, "Planner", PLANNER_MODEL);
     }
 
     const data = await response.json();
@@ -239,7 +261,7 @@ export async function askMistral({ question, context, signal }) {
     });
 
     if (!response.ok) {
-      throw new Error(`Chat failed: ${response.statusText}`);
+      await throwOllamaError(response, "Chat", CHAT_MODEL);
     }
 
     const data = await response.json();
@@ -269,7 +291,7 @@ export async function streamMistral({ question, context, signal, onToken }) {
     });
 
     if (!response.ok) {
-      throw new Error(`Chat failed: ${response.statusText}`);
+      await throwOllamaError(response, "Chat", CHAT_MODEL);
     }
 
     if (!response.body) {

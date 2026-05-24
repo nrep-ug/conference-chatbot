@@ -595,13 +595,19 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
                   ["Embedding model", runtime?.embedModel],
                   ["Planner", runtime?.plannerEnabled ? "Enabled" : "Disabled"],
                   [
+                    "REC full context",
+                    runtime?.recFullContextEnabled
+                      ? runtime?.recFullContextMode
+                      : "Disabled",
+                  ],
+                  [
                     "Qdrant complement",
                     runtime?.qdrantComplementEnabled
                       ? runtime?.qdrantComplementMode
                       : "Disabled",
                   ],
                   [
-                    "Full context",
+                    "Qdrant full context",
                     runtime?.qdrantFullContextEnabled
                       ? runtime?.qdrantFullContextMode
                       : "Disabled",

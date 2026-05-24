@@ -93,6 +93,10 @@ PLANNER_MAX_ROWS_PER_OPERATION=12
 PLANNER_MAX_CONTEXT_CHARS=3200
 PLANNER_SCHEMA_MAX_CHARS=2200
 
+REC_FULL_CONTEXT_ENABLED=true
+REC_FULL_CONTEXT_MODE=fallback
+REC_FULL_CONTEXT_MAX_CHARS=18000
+REC_FULL_CONTEXT_SCHEMA_MAX_CHARS=6000
 RAG_SEARCH_LIMIT=1
 RAG_MAX_CONTEXT_CHARS=1600
 RAG_MIN_SEARCH_SCORE=0.52
@@ -249,10 +253,11 @@ The chat route uses this order:
 1. Scope guard for greetings and off-topic questions.
 2. Direct Appwrite answers for deterministic facts such as venue, dates, registration status, contact details, capacity, fees, website, sponsors, and common programme questions.
 3. Optional Qdrant complement for broad direct answers such as detailed overviews, session summaries, learning questions, technology-area questions, and preparation questions. Appwrite still provides the authoritative answer; Qdrant only adds indexed supporting context. Set `QDRANT_COMPLEMENT_ENABLED=true` to enable it. The default `QDRANT_COMPLEMENT_MODE=append` avoids a second chat-model call; use `model` only if you want the model to rewrite the direct answer with Qdrant context.
-4. Optional full Qdrant context for broad/advisory questions. Set `QDRANT_FULL_CONTEXT_ENABLED=true` to give the answer model the complete indexed public REC26 dataset when the question needs synthesis rather than a single row lookup. `QDRANT_FULL_CONTEXT_MODE=broad` limits this to broad questions; `always` sends full context for every model-backed question.
-5. Planner lookup for richer cross-table questions. The human-readable schema lives in `docs/conference-schema.md`; the runtime planner receives a compact schema prompt from `src/lib/rec-schema.js`, returns a strict JSON plan, and `src/lib/rec-planner.js` validates the requested tables, fields, filters, sorting, and limits before retrieving public REC26 data.
-6. Qdrant semantic search as a fallback.
-7. Official facts in model-backed answers must come from retrieved context. For preparation, planning, logistics, and recommendations, the model may add practical advice when it is clearly grounded in the context and not presented as an official conference fact.
+4. Full public Appwrite/snapshot context for unresolved conference questions. `REC_FULL_CONTEXT_ENABLED=true` gives the answer model the public active-conference data plus the conference schema when the deterministic resolver does not know the requested answer shape. `REC_FULL_CONTEXT_MODE=fallback` applies this only after direct answers miss; `broad` restricts it to broad synthesis questions.
+5. Optional full Qdrant context for broad/advisory questions. Set `QDRANT_FULL_CONTEXT_ENABLED=true` to give the answer model the complete indexed public REC26 dataset when the question needs synthesis rather than a single row lookup. `QDRANT_FULL_CONTEXT_MODE=broad` limits this to broad questions; `always` sends full context for every model-backed question.
+6. Planner lookup for richer cross-table questions. The human-readable schema lives in `docs/conference-schema.md`; the runtime planner receives a compact schema prompt from `src/lib/rec-schema.js`, returns a strict JSON plan, and `src/lib/rec-planner.js` validates the requested tables, fields, filters, sorting, and limits before retrieving public REC26 data.
+7. Qdrant semantic search as a fallback.
+8. Official facts in model-backed answers must come from retrieved context. For preparation, planning, logistics, and recommendations, the model may add practical advice when it is clearly grounded in the context and not presented as an official conference fact.
 
 The machine-readable schema allowlist lives in `src/lib/rec-schema.js`. Update both that file and `docs/conference-schema.md` when the public REC table structure changes.
 
@@ -327,6 +332,10 @@ CHAT_NUM_CTX=8192
 CHAT_NUM_PREDICT=260
 CHAT_NUM_THREAD=12
 PLANNER_NUM_THREAD=12
+REC_FULL_CONTEXT_ENABLED=true
+REC_FULL_CONTEXT_MODE=fallback
+REC_FULL_CONTEXT_MAX_CHARS=18000
+REC_FULL_CONTEXT_SCHEMA_MAX_CHARS=6000
 RAG_SEARCH_LIMIT=1
 RAG_MAX_CONTEXT_CHARS=1600
 QDRANT_COMPLEMENT_ENABLED=true
@@ -336,7 +345,7 @@ QDRANT_FULL_CONTEXT_MODE=broad
 QDRANT_FULL_CONTEXT_MAX_CHARS=12000
 ```
 
-For faster but smaller local models, `gemma2:2b` or `qwen2.5:3b` are still usable. With `command-r`, keep broad Qdrant complement in `append` mode unless you intentionally want a second model pass with `QDRANT_COMPLEMENT_MODE=model`. Full Qdrant context is useful for advisory questions, but keep `CHAT_NUM_CTX` high enough for the selected model.
+For faster but smaller local models, `gemma2:2b` or `qwen2.5:3b` are still usable. With `command-r`, keep broad Qdrant complement in `append` mode unless you intentionally want a second model pass with `QDRANT_COMPLEMENT_MODE=model`. Full REC snapshot context is the preferred fallback for unusual phrasing because it uses the generated Appwrite source data directly; keep `CHAT_NUM_CTX` high enough for the selected model.
 
 ## Reverse Proxy Notes
 
