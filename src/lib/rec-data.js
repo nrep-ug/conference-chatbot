@@ -102,6 +102,23 @@ function formatTime(value) {
   }).format(new Date(value));
 }
 
+function getKampalaMinutes(value) {
+  if (!value) return null;
+
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZone: "Africa/Kampala",
+  }).formatToParts(new Date(value));
+  const hour = Number(parts.find((part) => part.type === "hour")?.value);
+  const minute = Number(parts.find((part) => part.type === "minute")?.value);
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+
+  return hour * 60 + minute;
+}
+
 function normalizeQuestion(question) {
   return question.toLowerCase().replace(/\s+/g, " ").trim();
 }
@@ -517,31 +534,81 @@ function extractRequestedDay(normalized) {
   return extractRequestedDays(normalized)[0] || null;
 }
 
-function answerDaySchedule(day, snapshot) {
+function getRequestedDayPart(normalized) {
+  if (/\blate morning\b/.test(normalized)) {
+    return { label: "late morning", startMinutes: 660, endMinutes: 780 };
+  }
+
+  if (/\bmorning\b/.test(normalized)) {
+    return { label: "morning", startMinutes: 0, endMinutes: 780 };
+  }
+
+  if (/\bafternoon\b/.test(normalized)) {
+    return { label: "afternoon", startMinutes: 780, endMinutes: Infinity };
+  }
+
+  if (/\bevening\b/.test(normalized)) {
+    return { label: "evening", startMinutes: 1020, endMinutes: Infinity };
+  }
+
+  return null;
+}
+
+function overlapsDayPart(startMinutes, endMinutes, dayPart) {
+  if (!dayPart) return true;
+  if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes)) {
+    return false;
+  }
+
+  return endMinutes > dayPart.startMinutes && startMinutes < dayPart.endMinutes;
+}
+
+function blockOverlapsDayPart(block, dayPart) {
+  return overlapsDayPart(
+    block.startMinutes ?? getKampalaMinutes(block.startTime),
+    block.endMinutes ?? getKampalaMinutes(block.endTime),
+    dayPart
+  );
+}
+
+function sessionOverlapsDayPart(session, dayPart) {
+  return overlapsDayPart(
+    getKampalaMinutes(session.startTime),
+    getKampalaMinutes(session.toTime),
+    dayPart
+  );
+}
+
+function answerDaySchedule(day, snapshot, options = {}) {
+  const dayPart = options.dayPart || null;
   const days = parseJson(snapshot.conference.days, []);
   const dayInfo = days[day - 1];
   const sessions = snapshot.sessions
     .filter((session) => session.day === day)
+    .filter((session) => sessionOverlapsDayPart(session, dayPart))
     .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
   const timeBlocks = snapshot.timeBlocks
     .filter((block) => block.day === day)
+    .filter((block) => blockOverlapsDayPart(block, dayPart))
     .sort((a, b) => (a.startMinutes || 0) - (b.startMinutes || 0));
 
   if (!dayInfo && sessions.length === 0 && timeBlocks.length === 0) {
-    return `I could not find schedule information for Day ${day} in the conference materials.`;
+    return `I could not find schedule information for Day ${day}${dayPart ? ` in the ${dayPart.label}` : ""} in the conference materials.`;
   }
 
   const sessionSummary = sessions
     .slice(0, 8)
     .map((session) =>
       compact([
-        formatTime(session.startTime),
+        session.startTime && session.toTime
+          ? `${formatTime(session.startTime)}-${formatTime(session.toTime)}`
+          : formatTime(session.startTime),
         session.title,
         session.venueHall ? `at ${session.venueHall}` : null,
       ]).join(" ")
     );
   const blockSummary = timeBlocks
-    .slice(0, 5)
+    .slice(0, dayPart ? 12 : 5)
     .map((block) =>
       compact([
         `${formatTime(block.startTime)}-${formatTime(block.endTime)}`,
@@ -551,7 +618,7 @@ function answerDaySchedule(day, snapshot) {
     );
 
   return joinMarkdownSections([
-    `Day ${day}${dayInfo?.date ? ` (${dayInfo.date})` : ""}${dayInfo?.theme ? ` focuses on ${dayInfo.theme}` : ""}.`,
+    `Day ${day}${dayInfo?.date ? ` (${dayInfo.date})` : ""}${dayPart ? ` ${dayPart.label}` : ""}${dayInfo?.theme ? ` focuses on ${dayInfo.theme}` : ""}.`,
     blockSummary.length
       ? `**Main blocks**\n${markdownList(blockSummary)}`
       : null,
@@ -578,6 +645,48 @@ function answerDayDate(snapshot, dayNumber) {
   }
 
   return `Day ${dayNumber} of ${snapshot.conference.shortName || snapshot.conference.title} is ${day.date}${day.theme ? `, with the focus area "${day.theme}"` : ""}.`;
+}
+
+function cleanSpeakerText(value) {
+  return stripHtml(value)
+    .replace(/\b(details?\s+forthcoming|to be confirmed)\b/gi, (match) =>
+      match.toLowerCase()
+    )
+    .trim();
+}
+
+function hasNamedSpeaker(value) {
+  const text = normalizeQuestion(value);
+
+  return Boolean(text) && !/^(tbc|details? forthcoming|to be confirmed|none|n\/a)$/.test(text);
+}
+
+function answerSpeakersOverview(snapshot, requestedDays) {
+  const selectedDays = normalizeRequestedDays(requestedDays);
+  const sessions = getSessionsForDays(snapshot, selectedDays)
+    .sort((a, b) => a.day - b.day || new Date(a.startTime) - new Date(b.startTime));
+
+  if (sessions.length === 0) {
+    return selectedDays.length > 0
+      ? `I could not find sessions for ${formatRequestedDays(selectedDays)}, so I could not check speaker details.`
+      : "I could not find sessions in the published programme, so I could not check speaker details.";
+  }
+
+  const rows = sessions.map((session) => {
+    const speakers = cleanSpeakerText(session.speakers);
+    return `${session.title} (Day ${session.day}, ${session.venueHall}): ${speakers || "not listed"}`;
+  });
+  const namedSpeakers = sessions
+    .map((session) => cleanSpeakerText(session.speakers))
+    .filter(hasNamedSpeaker);
+  const scope = selectedDays.length > 0
+    ? formatRequestedDays(selectedDays)
+    : "the published programme";
+  const introduction = namedSpeakers.length > 0
+    ? `Published speaker details for ${scope}:`
+    : `Published speaker names for ${scope} are not yet available. The current speaker fields are:`;
+
+  return joinMarkdownSections([introduction, markdownList(rows)]);
 }
 
 function answerDaysCount(snapshot) {
@@ -1240,6 +1349,18 @@ function isDayDateQuestion(normalized) {
 
 function isDayScheduleQuestion(normalized) {
   return /\b(what happens|happen|agenda|schedule|program|programme|activity|activities|events?|day schedule)\b/.test(
+    normalized
+  );
+}
+
+function isDayFollowUpQuestion(normalized) {
+  return /\b(what of|what about|how about|and what about)\s+days?\b/.test(
+    normalized
+  );
+}
+
+function isSpeakerQuestion(normalized) {
+  return /\b(speaker|speakers|presenter|presenters|panelist|panelists)\b/.test(
     normalized
   );
 }
@@ -2045,6 +2166,7 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
   const dayThemeMatch = getDayThemeMatch(normalized, snapshot);
   const requestedDays = extractRequestedDays(normalized);
   const requestedDay = requestedDays[0] || null;
+  const requestedDayPart = getRequestedDayPart(normalized);
   const requestedHall = findRequestedHall(normalized, snapshot);
   const mentionedSession = findMentionedSession(normalized, snapshot.sessions);
   const ceremonyBlock = findCeremonyBlock(snapshot, normalized);
@@ -2145,6 +2267,16 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
           : null,
         firstSession ? sourceFor("session", firstSession, firstSession.title) : null,
       ].filter(Boolean)
+    );
+  }
+
+  if (isSpeakerQuestion(normalized)) {
+    const speakerSessions = getSessionsForDays(snapshot, requestedDays);
+    addPart(
+      answerSpeakersOverview(snapshot, requestedDays),
+      speakerSessions
+        .slice(0, requestedDays.length > 0 ? speakerSessions.length : 12)
+        .map((session) => sourceFor("session", session, session.title))
     );
   }
 
@@ -2411,13 +2543,26 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     addPart(answerDayDate(snapshot, requestedDay), sources);
   }
 
-  if (requestedDay && isDayScheduleQuestion(normalized)) {
+  if (
+    requestedDay &&
+    (isDayScheduleQuestion(normalized) ||
+      isDayFollowUpQuestion(normalized) ||
+      requestedDayPart)
+  ) {
     addPart(
-      answerDaySchedule(requestedDay, snapshot),
-      snapshot.sessions
-        .filter((session) => session.day === requestedDay)
-        .slice(0, 8)
-        .map((session) => sourceFor("session", session, session.title))
+      answerDaySchedule(requestedDay, snapshot, { dayPart: requestedDayPart }),
+      [
+        ...snapshot.timeBlocks
+          .filter((block) => block.day === requestedDay)
+          .filter((block) => blockOverlapsDayPart(block, requestedDayPart))
+          .slice(0, 10)
+          .map((block) => sourceFor("program_time_block", block, block.label)),
+        ...snapshot.sessions
+          .filter((session) => session.day === requestedDay)
+          .filter((session) => sessionOverlapsDayPart(session, requestedDayPart))
+          .slice(0, 8)
+          .map((session) => sourceFor("session", session, session.title)),
+      ]
     );
   }
 
@@ -2490,7 +2635,7 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   const normalized = normalizeQuestion(question);
 
   if (
-    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|focus|sponsor|partner|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|exhibition|exhibit|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer|renewable|energy|beginner|new|implementation|sustainability|technology|technologies|technical|ceremony|opening|closing|start|starts|starting|begin|begins|prepare|preparation|planning|maximize|maximise|cooking|cookstove|solco|biofuel|geothermal|nuclear|productive use|efficiency)/.test(
+    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|focus|sponsor|partner|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|speaker|speakers|presenter|presenters|panelist|panelists|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|exhibition|exhibit|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer|renewable|energy|beginner|new|implementation|sustainability|technology|technologies|technical|ceremony|opening|closing|start|starts|starting|begin|begins|prepare|preparation|planning|maximize|maximise|cooking|cookstove|solco|biofuel|geothermal|nuclear|productive use|efficiency)/.test(
       normalized
     )
   ) {
@@ -2503,6 +2648,7 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   const mentionedSponsor = findMentionedSponsor(normalized, snapshot.sponsors);
   const requestedDays = extractRequestedDays(normalized);
   const requestedDay = requestedDays[0] || null;
+  const requestedDayPart = getRequestedDayPart(normalized);
   const mentionedSession = findMentionedSession(normalized, snapshot.sessions);
   const requestedHall = findRequestedHall(normalized, snapshot);
   const dayThemeMatch = getDayThemeMatch(normalized, snapshot);
@@ -2568,6 +2714,20 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
       sources: [
         sourceFor("conference_overview", conference, conference.title),
         sourceFor("program_time_block", ceremonyBlock, ceremonyBlock.label),
+      ],
+    };
+  }
+
+  if (isSpeakerQuestion(normalized)) {
+    const speakerSessions = getSessionsForDays(snapshot, requestedDays);
+
+    return {
+      answer: answerSpeakersOverview(snapshot, requestedDays),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...speakerSessions
+          .slice(0, requestedDays.length > 0 ? speakerSessions.length : 12)
+          .map((session) => sourceFor("session", session, session.title)),
       ],
     };
   }
@@ -2949,13 +3109,26 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     };
   }
 
-  if (requestedDay && isDayScheduleQuestion(normalized)) {
+  if (
+    requestedDay &&
+    (isDayScheduleQuestion(normalized) ||
+      isDayFollowUpQuestion(normalized) ||
+      requestedDayPart)
+  ) {
     return {
-      answer: answerDaySchedule(requestedDay, snapshot),
+      answer: answerDaySchedule(requestedDay, snapshot, {
+        dayPart: requestedDayPart,
+      }),
       sources: [
         sourceFor("conference_overview", conference, conference.title),
+        ...snapshot.timeBlocks
+          .filter((block) => block.day === requestedDay)
+          .filter((block) => blockOverlapsDayPart(block, requestedDayPart))
+          .slice(0, 10)
+          .map((block) => sourceFor("program_time_block", block, block.label)),
         ...snapshot.sessions
           .filter((session) => session.day === requestedDay)
+          .filter((session) => sessionOverlapsDayPart(session, requestedDayPart))
           .slice(0, 8)
           .map((session) => sourceFor("session", session, session.title)),
       ],
