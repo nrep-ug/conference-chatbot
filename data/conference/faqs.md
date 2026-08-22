@@ -1,8 +1,8 @@
 # FAQs
 
-Registration is completed through the official conference website.
+Registration is completed through the official conference website (rec.nre.ug/register).
 
-Participants should carry their confirmation email or registration code.
+Participants should carry their, attendance identification tag, confirmation email or registration code.
 
 The venue is Serena Hotel, Kampala.
 

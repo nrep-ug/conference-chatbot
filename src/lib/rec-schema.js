@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export const REC_SCHEMA_VERSION = "2026-05-20";
+export const REC_SCHEMA_VERSION = "2026-08-23";
 export const REC_SCHEMA_MARKDOWN_PATH = "docs/conference-schema.md";
 
 export const REC_SCHEMA = {
@@ -9,12 +9,14 @@ export const REC_SCHEMA = {
     title: "Renewable Energy Conference & Expo 2026",
     shortName: "REC26 & EXPO",
     activeRowId: "6863b66b0016bd6d77ff",
-    enforcedFilter: "REC_Conferences.isActive = true",
+    defaultFilter: "REC_Conferences.isActive = true",
+    historicalRule:
+      "Use an explicit year, REC edition, or past/previous/history wording before selecting an inactive conference.",
   },
   tables: {
     conferences: {
       label: "REC_Conferences",
-      purpose: "Active conference facts, dates, venue, registration status, theme, limits, contact, and website.",
+      purpose: "Conference-edition facts, dates, venue, registration status, theme, limits, contact, and website. Defaults to the active row.",
       fields: [
         "year",
         "title",
@@ -70,7 +72,7 @@ export const REC_SCHEMA = {
     },
     programs: {
       label: "REC_Program",
-      purpose: "Programme container for the active conference.",
+      purpose: "Programme containers for active and previous conference editions.",
       fields: [
         "conferenceId",
         "description",
@@ -197,6 +199,86 @@ export const REC_SCHEMA = {
       ],
       searchableFields: ["name", "description", "siteUrl"],
     },
+    mediaItems: {
+      label: "REC Media Items",
+      purpose: "Published photo albums, videos, thumbnails, and sample conference images by conference edition.",
+      fields: [
+        "conferenceId",
+        "conferenceYear",
+        "mediaType",
+        "title",
+        "slug",
+        "description",
+        "externalUrl",
+        "videoUrl",
+        "thumbnailUrl",
+        "thumbnailFileId",
+        "sampleImagesJson",
+        "displayOrder",
+        "isFeatured",
+        "isPublished",
+        "updatedAt",
+      ],
+      defaultFields: [
+        "conferenceYear",
+        "mediaType",
+        "title",
+        "description",
+        "externalUrl",
+        "videoUrl",
+        "sampleImagesJson",
+      ],
+      searchableFields: [
+        "title",
+        "description",
+        "mediaType",
+        "slug",
+      ],
+    },
+    reports: {
+      label: "REC Conference Reports",
+      purpose:
+        "Published conference reports, proceedings, outcomes, communiques, summaries, PDF links, and cover images by conference edition.",
+      fields: [
+        "conferenceId",
+        "conferenceYear",
+        "reportType",
+        "title",
+        "summary",
+        "reportUrl",
+        "coverImageUrl",
+        "publicationDate",
+        "displayOrder",
+        "isFeatured",
+        "isPublished",
+        "updatedAt",
+      ],
+      defaultFields: [
+        "conferenceYear",
+        "reportType",
+        "title",
+        "summary",
+        "reportUrl",
+        "publicationDate",
+        "isFeatured",
+      ],
+      searchableFields: ["title", "summary", "reportType"],
+    },
+    operationalInfo: {
+      label: "Admin Published Operational Information",
+      purpose: "Admin-managed public venue and visitor facts for the active conference, such as guest Wi-Fi, transport, accessibility, catering, and safety guidance.",
+      fields: [
+        "conferenceId",
+        "category",
+        "title",
+        "answer",
+        "keywords",
+        "isPublished",
+        "updatedAt",
+      ],
+      defaultFields: ["category", "title", "answer", "keywords"],
+      searchableFields: ["category", "title", "answer", "keywords"],
+    },
   },
   allowedFilters: [
     "day",
@@ -209,6 +291,13 @@ export const REC_SCHEMA = {
     "categoryName",
     "status",
     "isActive",
+    "isPublished",
+    "year",
+    "conferenceYear",
+    "mediaType",
+    "reportType",
+    "category",
+    "isFeatured",
   ],
   allowedSortFields: [
     "day",
@@ -221,6 +310,9 @@ export const REC_SCHEMA = {
     "displayOrder",
     "title",
     "name",
+    "year",
+    "conferenceYear",
+    "publicationDate",
   ],
 };
 
@@ -238,7 +330,8 @@ function compactPlannerSchema() {
   return [
     `Schema version: ${REC_SCHEMA_VERSION}`,
     `Active conference: ${REC_SCHEMA.activeConference.title} (${REC_SCHEMA.activeConference.shortName})`,
-    `Scope rule: ${REC_SCHEMA.activeConference.enforcedFilter}`,
+    `Default scope rule: ${REC_SCHEMA.activeConference.defaultFilter}`,
+    `Historical scope rule: ${REC_SCHEMA.activeConference.historicalRule}`,
     "Planner-allowed tables and fields:",
     tables,
     `Allowed filters: ${REC_SCHEMA.allowedFilters.join(", ")}`,
@@ -260,7 +353,7 @@ export function getPlannerSchemaMarkdown() {
 export function getPlannerSchemaPrompt() {
   return [
     `Schema version: ${REC_SCHEMA_VERSION}`,
-    "Scope: only public REC26 & EXPO data. Active conference is enforced by server.",
+    "Scope: public REC conference data. Default to the active REC26 & EXPO conference unless the user explicitly asks for a year, REC edition, or previous/past/history data.",
     "Never request registrations, coupons, locks, verifications, attendees, users, or private tables.",
     "Tables:",
     "- conferences: dates, venue, location, theme, registration status, fees, limits, contact, website.",
@@ -269,8 +362,12 @@ export function getPlannerSchemaPrompt() {
     "- sessions: session title, day, start/end time, venue hall, theme, preamble/details, organizer, speakers, status.",
     "- sponsorCategories: sponsor/partner category name, description, display order, active flag.",
     "- sponsors: sponsor/partner name, category, description, website, featured/active flags.",
-    "Allowed filters: day, date, keywords, title, theme, venueHall, type, categoryName, status, isActive.",
-    "Allowed sort fields: day, date, startTime, toTime, endTime, startMinutes, sortOrder, displayOrder, title, name.",
-    "Good table choices: session/topic/recommendation questions -> sessions; schedule/block/break/lunch questions -> timeBlocks; sponsor/partner questions -> sponsors plus sponsorCategories; overview/date/venue/theme/register/cost/contact -> conferences.",
+    "- mediaItems: published photo albums, videos, external links, thumbnails, and sample image links by conference edition.",
+    "- reports: published conference reports, proceedings, outcomes, communiques, summaries, PDF links, and cover images by conference edition.",
+    "- operationalInfo: published active-conference venue and visitor guidance maintained by admins.",
+    "Allowed filters: day, date, keywords, title, theme, venueHall, type, categoryName, category, status, isActive, isPublished, isFeatured, year, conferenceYear, mediaType, reportType.",
+    "Allowed sort fields: day, date, startTime, toTime, endTime, startMinutes, sortOrder, displayOrder, title, name, year, conferenceYear, publicationDate.",
+    "Good table choices: session/topic/recommendation questions -> sessions; schedule/block/break/lunch questions -> timeBlocks; sponsor/partner questions -> sponsors plus sponsorCategories; photo/video/gallery questions -> mediaItems; report/proceedings/outcomes/communique questions -> reports; guest logistics such as Wi-Fi, transport, accessibility, catering, or safety -> operationalInfo; overview/date/venue/theme/register/cost/contact -> conferences.",
+    "When historical scope is explicit, include the requested year or conferenceYear filter in every operation that supports it.",
   ].join("\n");
 }

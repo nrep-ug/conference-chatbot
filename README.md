@@ -8,7 +8,7 @@ A Next.js conference assistant that answers questions from local conference docu
 - Qdrant as a derived vector index over public Appwrite conference data
 - PM2 for self-hosted production deployment
 
-The current chat route streams responses to the browser, answers exact public conference facts directly from Appwrite, can use a planner model to select REC tables before the answer model responds, keeps Ollama models warm, limits prompt size, and caches repeated answers in memory.
+The chat route streams responses to the browser, answers exact public conference facts from a generated Appwrite snapshot, supports explicitly selected previous REC editions, media, and reports, can use a planner model for unresolved questions, keeps Ollama models warm, limits prompt size, and caches repeated answers in memory.
 
 ## Requirements
 
@@ -38,6 +38,7 @@ Key variables:
 
 ```bash
 OLLAMA_URL=http://localhost:11434
+OLLAMA_TIMEOUT_MS=300000
 
 APPWRITE_ENDPOINT=https://appwrite.nrep.ug/v1
 APPWRITE_PROJECT_ID=66bcc8450005201fa1af
@@ -49,6 +50,8 @@ APPWRITE_REC_PROGRAM_TIME_BLOCKS_TABLE_ID=rec_program_time_blocks
 APPWRITE_REC_SESSIONS_TABLE_ID=68e60fc1003b0bbb05d8
 APPWRITE_REC_SPONSOR_CATEGORIES_TABLE_ID=rec_sponsor_categories
 APPWRITE_REC_SPONSORS_TABLE_ID=rec_sponsors
+APPWRITE_REC_MEDIA_ITEMS_TABLE_ID=rec_media_items
+APPWRITE_REC_CONFERENCE_REPORTS_TABLE_ID=rec_conference_reports
 APPWRITE_TIMEOUT_MS=30000
 REC_DATA_CACHE_TTL_MS=300000
 REC_SNAPSHOT_ENABLED=true
@@ -56,9 +59,11 @@ REC_SNAPSHOT_STRICT=false
 REC_REFRESH_TOKEN=
 
 ADMIN_AUTH_FILE=data/admin/admin-users.json
+CONFERENCE_KNOWLEDGE_FILE=data/admin/conference-knowledge.json
 ADMIN_AUTH_SECRET=
 ADMIN_SESSION_TTL_MS=604800000
 ADMIN_LOGIN_CODE_TTL_MS=600000
+ADMIN_LOGIN_CODE_COOLDOWN_MS=60000
 
 SMTP_HOST=
 SMTP_PORT=587
@@ -80,8 +85,9 @@ PORT=3000
 CHAT_KEEP_ALIVE=30m
 EMBED_KEEP_ALIVE=30m
 CHAT_NUM_CTX=8192
-CHAT_NUM_PREDICT=260
+CHAT_NUM_PREDICT=360
 CHAT_NUM_THREAD=12
+CHAT_MAX_QUESTION_CHARS=4000
 PLANNER_ENABLED=true
 PLANNER_KEEP_ALIVE=30m
 PLANNER_NUM_CTX=2048
@@ -96,7 +102,7 @@ PLANNER_SCHEMA_MAX_CHARS=2200
 REC_FULL_CONTEXT_ENABLED=true
 REC_FULL_CONTEXT_MODE=fallback
 REC_FULL_CONTEXT_MAX_CHARS=18000
-REC_FULL_CONTEXT_SCHEMA_MAX_CHARS=6000
+REC_FULL_CONTEXT_SCHEMA_MAX_CHARS=2500
 RAG_SEARCH_LIMIT=1
 RAG_MAX_CONTEXT_CHARS=1600
 RAG_MIN_SEARCH_SCORE=0.52
@@ -165,9 +171,13 @@ It provides:
 - client-side password digest before transport plus server-side `scrypt` storage in JSON
 - HttpOnly session cookies
 - snapshot refresh and optional Qdrant rebuild controls
+- active-conference venue and visitor knowledge with draft/published states
+- historical conference, media, and report counts
 - runtime status for models, Qdrant, SMTP, and generated REC data
 
 Runtime account data is stored in `data/admin/admin-users.json`, which is ignored by git. The tracked seed file is `data/admin/admin-users.example.json`.
+
+Admin-managed public visitor facts are stored in `data/admin/conference-knowledge.json`, which is also ignored by git. Its tracked seed is `data/admin/conference-knowledge.example.json`. Entries are always bound server-side to the active conference. Only entries marked **Published** are added to chatbot context and Qdrant. Store only public guest information here; do not add staff networks, internal systems, or private credentials.
 
 Before first production use:
 
@@ -192,6 +202,8 @@ SMTP_FROM=bot@example.com
 
 `ADMIN_AUTH_SECRET` signs login codes and session tokens. If it is missing, the app falls back to other server secrets or a per-process secret, which can invalidate sessions after restart.
 
+To publish venue or visitor guidance, open **Venue and visitor knowledge** in `/admin`, add a category, public topic, answer, and comma-separated matching keywords, then enable **Published**. **Save changes** updates the local snapshot immediately. **Save + rebuild Qdrant** also refreshes semantic retrieval and can take longer. Draft entries remain visible to admins but never enter public snapshots or vector documents.
+
 ## Conference Data
 
 The source of truth is the `HR` Appwrite database:
@@ -202,19 +214,27 @@ The source of truth is the `HR` Appwrite database:
 - `REC_Sessions`
 - `REC_SponsorCategories`
 - `REC_Sponsors`
+- `REC Media Items`
+- `REC Conference Reports`
 
 The chatbot intentionally does not ingest private registration/security tables such as `REC_Registrations`, `REC_Reg_Coupon`, `REC Registration Locks`, or `REC Registration Verifications`.
 
-The active public conference data is exported into generated local snapshot files:
+Public conference data is exported into generated local snapshot files:
 
-- `data/generated/rec-current.json` is the machine-readable runtime snapshot.
+- `data/generated/rec-current.json` is a normalized, machine-readable snapshot containing the active conference, its published operational information, and available previous editions.
 - `data/generated/rec-current.md` is a human-readable generated context file for inspection and LLM/vector context.
 
 These files are generated artifacts and are ignored by git. Appwrite remains the source of truth.
 
+The JSON snapshot uses conference-centric schema version `3.1` instead of exposing raw Appwrite rows. Its top level contains active-conference facts such as dates, venue, registration status, theme, website, and contact details. `program` groups time blocks and non-draft sessions by conference day, `sponsors` groups active sponsors under active categories, `operationalInfo` contains published admin visitor facts, and `media` and `reports` contain published current-edition resources. `previousConferences` contains normalized public historical editions with their programmes, sponsors, media, and reports. Sessions are included only when they belong to a time block where `allowSessions=true`; reports are included only when `isPublished=true`.
+
+Each normalized time block and session includes a readable time such as `8:30 am` and its original ISO timestamp in `startAt`/`endAt`. Internal IDs are retained only where needed for source tracing and relationship validation. The runtime adapter accepts the legacy collection-shaped snapshot plus normalized schema versions `2.0`, `3.0`, and `3.1`, so an existing VPS snapshot remains readable until the next refresh.
+
 At runtime, the chatbot reads `rec-current.json` first when `REC_SNAPSHOT_ENABLED=true`. If the file is missing or invalid, it falls back to Appwrite unless `REC_SNAPSHOT_STRICT=true`.
 
-The ingestion script reads the same runtime snapshot, converts it into clean text documents, embeds those documents with Ollama, recreates the Qdrant collection, and upserts the vectors.
+The active conference remains the default. Historical data is selected only by explicit scope, for example `What was the REC24 theme?`, `Compare REC25 and REC26`, `Show photos from 2023`, `Can I download the REC25 conference report?`, or `Tell me about previous conferences`. A current-conference question does not silently mix prior-edition data.
+
+The ingestion script reads the same runtime snapshot, converts active and historical public data into clean text documents, embeds those documents with Ollama, recreates the Qdrant collection, and upserts the vectors. Qdrant payloads include `conferenceId`, `year`, `isActiveConference`, and a resource-specific `sourceType` such as `conference_media` or `conference_report`, so historical results remain distinguishable.
 
 After changing public conference content in Appwrite, run:
 
@@ -251,11 +271,11 @@ Authenticated admins can also refresh the same data from `/admin` without using 
 The chat route uses this order:
 
 1. Scope guard for greetings and off-topic questions.
-2. Direct Appwrite answers for deterministic facts such as venue, dates, registration status, contact details, capacity, fees, website, sponsors, and common programme questions.
+2. Direct snapshot answers for deterministic facts such as venue, dates, registration status, contact details, capacity, fees, website, sponsors, published visitor guidance, historical editions, media, reports, and common programme questions.
 3. Optional Qdrant complement for broad direct answers such as detailed overviews, session summaries, learning questions, technology-area questions, and preparation questions. Appwrite still provides the authoritative answer; Qdrant only adds indexed supporting context. Set `QDRANT_COMPLEMENT_ENABLED=true` to enable it. The default `QDRANT_COMPLEMENT_MODE=append` avoids a second chat-model call; use `model` only if you want the model to rewrite the direct answer with Qdrant context.
-4. Full public Appwrite/snapshot context for unresolved conference questions. `REC_FULL_CONTEXT_ENABLED=true` gives the answer model the public active-conference data plus the conference schema when the deterministic resolver does not know the requested answer shape. `REC_FULL_CONTEXT_MODE=fallback` applies this only after direct answers miss; `broad` restricts it to broad synthesis questions.
-5. Optional full Qdrant context for broad/advisory questions. Set `QDRANT_FULL_CONTEXT_ENABLED=true` to give the answer model the complete indexed public REC26 dataset when the question needs synthesis rather than a single row lookup. `QDRANT_FULL_CONTEXT_MODE=broad` limits this to broad questions; `always` sends full context for every model-backed question.
-6. Planner lookup for richer cross-table questions. The human-readable schema lives in `docs/conference-schema.md`; the runtime planner receives a compact schema prompt from `src/lib/rec-schema.js`, returns a strict JSON plan, and `src/lib/rec-planner.js` validates the requested tables, fields, filters, sorting, and limits before retrieving public REC26 data.
+4. Full public snapshot context for unresolved conference questions. `REC_FULL_CONTEXT_ENABLED=true` gives the answer model the public active and historical data plus the conference schema when the deterministic resolver does not know the requested answer shape. Historical bundles are moved ahead of active data when the question names their year or REC edition. `REC_FULL_CONTEXT_MODE=fallback` applies this only after direct answers miss; `broad` restricts it to broad synthesis questions.
+5. Optional full Qdrant context for broad/advisory questions. Set `QDRANT_FULL_CONTEXT_ENABLED=true` to give the answer model indexed public REC data when the question needs synthesis rather than a single row lookup. `QDRANT_FULL_CONTEXT_MODE=broad` limits this to broad questions; `always` sends full context for every model-backed question.
+6. Planner lookup for richer cross-table questions. The human-readable schema lives in `docs/conference-schema.md`; the runtime planner receives a compact schema prompt from `src/lib/rec-schema.js`, returns a strict JSON plan, and `src/lib/rec-planner.js` validates requested tables, fields, filters, sorting, limits, and conference-year scope before retrieving public REC data.
 7. Qdrant semantic search as a fallback.
 8. Official facts in model-backed answers must come from retrieved context. For preparation, planning, logistics, and recommendations, the model may add practical advice when it is clearly grounded in the context and not presented as an official conference fact.
 
@@ -295,10 +315,10 @@ npm run dev      # Start Next.js in development mode
 npm run build    # Build the production app
 npm run start    # Start the production app after building
 npm run lint     # Run ESLint
-npm test         # Runs lint
-npm run export:rec # Export active Appwrite REC data to data/generated/
+npm test         # Run deterministic chatbot tests and ESLint
+npm run export:rec # Export active and historical public REC data
 npm run ingest   # Rebuild the Qdrant vector collection
-npm run refresh:rec # Export active REC data, then rebuild Qdrant
+npm run refresh:rec # Export public REC data, then rebuild Qdrant
 ```
 
 ## Production Deployment
@@ -323,19 +343,25 @@ The PM2 config:
 - runs two clustered Next.js instances
 - writes logs to `logs/pm2-out.log` and `logs/pm2-error.log`
 
-For the target VPS with 14 CPU cores and 20 GB RAM, the recommended default is:
+For `command-r:latest`, use at least 24 GB RAM and preferably 32 GB RAM. In local
+testing, the current Ollama `command-r` Q4 model used about 20.5 GB of resident
+memory with an 8,192-token context before accounting for Next.js, Qdrant, the OS,
+or concurrent requests. A 20 GB server can therefore swap heavily or run out of
+memory with this configuration.
+
+On a server with enough memory for `command-r`, use:
 
 ```bash
 CHAT_MODEL=command-r
 PLANNER_MODEL=command-r
 CHAT_NUM_CTX=8192
-CHAT_NUM_PREDICT=260
+CHAT_NUM_PREDICT=360
 CHAT_NUM_THREAD=12
 PLANNER_NUM_THREAD=12
 REC_FULL_CONTEXT_ENABLED=true
 REC_FULL_CONTEXT_MODE=fallback
 REC_FULL_CONTEXT_MAX_CHARS=18000
-REC_FULL_CONTEXT_SCHEMA_MAX_CHARS=6000
+REC_FULL_CONTEXT_SCHEMA_MAX_CHARS=2500
 RAG_SEARCH_LIMIT=1
 RAG_MAX_CONTEXT_CHARS=1600
 QDRANT_COMPLEMENT_ENABLED=true
@@ -345,7 +371,13 @@ QDRANT_FULL_CONTEXT_MODE=broad
 QDRANT_FULL_CONTEXT_MAX_CHARS=12000
 ```
 
-For faster but smaller local models, `gemma2:2b` or `qwen2.5:3b` are still usable. With `command-r`, keep broad Qdrant complement in `append` mode unless you intentionally want a second model pass with `QDRANT_COMPLEMENT_MODE=model`. Full REC snapshot context is the preferred fallback for unusual phrasing because it uses the generated Appwrite source data directly; keep `CHAT_NUM_CTX` high enough for the selected model.
+For the current 14-core, 20 GB VPS, use `qwen2.5:3b` or another smaller model for
+both `CHAT_MODEL` and `PLANNER_MODEL`, or increase the server memory before using
+`command-r`. With `command-r`, keep broad Qdrant complement in `append` mode unless
+you intentionally want a second model pass with `QDRANT_COMPLEMENT_MODE=model`.
+Full REC snapshot context is the preferred fallback for unusual phrasing because
+it uses the generated Appwrite source data directly; keep `CHAT_NUM_CTX` high
+enough for the selected model.
 
 ## Reverse Proxy Notes
 

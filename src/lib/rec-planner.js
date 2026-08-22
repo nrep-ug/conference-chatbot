@@ -16,6 +16,9 @@ const SOURCE_TYPES = {
   sessions: "session",
   sponsorCategories: "sponsor_category",
   sponsors: "sponsor",
+  mediaItems: "conference_media",
+  reports: "conference_report",
+  operationalInfo: "operational_info",
 };
 
 function readInteger(name, fallback) {
@@ -118,16 +121,41 @@ function sanitizeFilters(filters = {}) {
     if (day >= 1 && day <= 10) sanitized.day = day;
   }
 
+  for (const key of ["year", "conferenceYear"]) {
+    if (Number.isFinite(Number(filters[key]))) {
+      const year = Number(filters[key]);
+      if (year >= 2000 && year <= 2100) sanitized[key] = year;
+    }
+  }
+
   const date = cleanString(filters.date, 20);
   if (/^\d{4}-\d{2}-\d{2}/.test(date)) sanitized.date = date.slice(0, 10);
 
-  for (const key of ["title", "theme", "venueHall", "type", "categoryName", "status"]) {
+  for (const key of [
+    "title",
+    "theme",
+    "venueHall",
+    "type",
+    "categoryName",
+    "category",
+    "mediaType",
+    "reportType",
+    "status",
+  ]) {
     const value = cleanString(filters[key]);
     if (value) sanitized[key] = value;
   }
 
   if (typeof filters.isActive === "boolean") {
     sanitized.isActive = filters.isActive;
+  }
+
+  if (typeof filters.isPublished === "boolean") {
+    sanitized.isPublished = filters.isPublished;
+  }
+
+  if (typeof filters.isFeatured === "boolean") {
+    sanitized.isFeatured = filters.isFeatured;
   }
 
   const keywords = cleanStringArray(filters.keywords);
@@ -185,14 +213,55 @@ function sanitizePlan(rawPlan) {
   };
 }
 
+function getConferenceBundles(snapshot) {
+  return [
+    {
+      conference: snapshot.conference,
+      programs: snapshot.programs || [],
+      timeBlocks: snapshot.timeBlocks || [],
+      sessions: snapshot.sessions || [],
+      sponsorCategories: snapshot.sponsorCategories || [],
+      sponsors: snapshot.sponsors || [],
+      mediaItems: snapshot.mediaItems || [],
+      reports: snapshot.reports || [],
+      operationalInfo: snapshot.operationalInfo || [],
+    },
+    ...(snapshot.pastConferences || []),
+  ];
+}
+
 function getRows(snapshot, table) {
-  if (table === "conferences") return [snapshot.conference];
-  return snapshot[table] || [];
+  const bundles = getConferenceBundles(snapshot);
+
+  if (table === "conferences") {
+    return bundles.map((bundle) => ({
+      ...bundle.conference,
+      conferenceYear: bundle.conference.year,
+    }));
+  }
+
+  return bundles.flatMap((bundle) =>
+    (bundle[table] || []).map((row) => ({
+      ...row,
+      conferenceId: row.conferenceId || bundle.conference.$id,
+      conferenceYear: bundle.conference.year,
+      conferenceTitle: bundle.conference.title,
+    }))
+  );
 }
 
 function getSponsorCategoryMap(snapshot) {
   return new Map(
-    snapshot.sponsorCategories.map((category) => [category.$id, category.name])
+    getConferenceBundles(snapshot).reduce(
+      (entries, bundle) => [
+        ...entries,
+        ...(bundle.sponsorCategories || []).map((category) => [
+          category.$id,
+          category.name,
+        ]),
+      ],
+      []
+    )
   );
 }
 
@@ -228,10 +297,46 @@ function containsText(row, fields, value) {
 
 function rowMatchesFilters(row, table, filters, snapshot) {
   if (filters.day && Number(row.day) !== filters.day) return false;
+  if (filters.year && Number(row.year || row.conferenceYear) !== filters.year) {
+    return false;
+  }
+  if (
+    filters.conferenceYear &&
+    Number(row.conferenceYear || row.year) !== filters.conferenceYear
+  ) {
+    return false;
+  }
   if (filters.date && !normalize(row.date).includes(normalize(filters.date))) return false;
   if (filters.type && normalize(row.type) !== normalize(filters.type)) return false;
+  if (
+    filters.mediaType &&
+    normalize(row.mediaType) !== normalize(filters.mediaType)
+  ) {
+    return false;
+  }
+  if (
+    filters.reportType &&
+    normalize(row.reportType) !== normalize(filters.reportType)
+  ) {
+    return false;
+  }
+  if (filters.category && normalize(row.category) !== normalize(filters.category)) {
+    return false;
+  }
   if (filters.status && normalize(row.status) !== normalize(filters.status)) return false;
   if (typeof filters.isActive === "boolean" && row.isActive !== filters.isActive) {
+    return false;
+  }
+  if (
+    typeof filters.isPublished === "boolean" &&
+    row.isPublished !== filters.isPublished
+  ) {
+    return false;
+  }
+  if (
+    typeof filters.isFeatured === "boolean" &&
+    row.isFeatured !== filters.isFeatured
+  ) {
     return false;
   }
 
@@ -276,6 +381,11 @@ function defaultSort(table) {
   if (table === "sponsors" || table === "sponsorCategories") {
     return ["displayOrder", "name"];
   }
+  if (table === "mediaItems") return ["conferenceYear", "displayOrder", "title"];
+  if (table === "reports") {
+    return ["conferenceYear", "displayOrder", "title"];
+  }
+  if (table === "operationalInfo") return ["category", "title"];
   if (table === "conferences") return ["startDate"];
   return ["title"];
 }
@@ -308,7 +418,13 @@ function formatFieldValue(field, value, table, snapshot) {
   if (field === "startTime" || field === "toTime" || field === "endTime") {
     return formatTime(value);
   }
-  if (field === "startDate" || field === "endDate") return formatDate(value);
+  if (
+    field === "startDate" ||
+    field === "endDate" ||
+    field === "publicationDate"
+  ) {
+    return formatDate(value);
+  }
   if (field === "days") {
     return parseJson(value, [])
       .map((day) => `${day.label}: ${day.date}, ${day.theme}`)
@@ -316,6 +432,12 @@ function formatFieldValue(field, value, table, snapshot) {
   }
   if (field === "registrationFee" || field === "maxLimits" || field === "currentCounts") {
     return JSON.stringify(parseJson(value, value));
+  }
+  if (field === "sampleImagesJson") {
+    return parseJson(value, [])
+      .map((image) => image.url)
+      .filter(Boolean)
+      .join(", ");
   }
   if (field === "categoryId" && table === "sponsors") {
     return getSponsorCategoryMap(snapshot).get(value) || value;
@@ -342,8 +464,11 @@ function formatRowContext(row, table, fields, snapshot) {
   return [
     `Table: ${tableSchema.label}`,
     `Row: ${getRowLabel(row, table)}`,
+    row.conferenceYear ? `Conference year: ${row.conferenceYear}` : null,
     ...fieldLines,
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function sourceFor(table, row) {
@@ -357,7 +482,19 @@ function sourceFor(table, row) {
 }
 
 function executeOperation(operation, snapshot) {
+  const hasHistoricalFilter = Boolean(
+    operation.filters.year ||
+      operation.filters.conferenceYear ||
+      operation.filters.isActive === false
+  );
+  const activeConferenceId = snapshot.conference.$id;
   const rows = getRows(snapshot, operation.table)
+    .filter((row) => {
+      if (hasHistoricalFilter) return true;
+      const rowConferenceId =
+        operation.table === "conferences" ? row.$id : row.conferenceId;
+      return !rowConferenceId || rowConferenceId === activeConferenceId;
+    })
     .filter((row) => rowMatchesFilters(row, operation.table, operation.filters, snapshot));
   const sortedRows = sortRows(rows, operation.table, operation.sort).slice(
     0,
@@ -409,7 +546,11 @@ function executePlan(plan, snapshot) {
   }
 
   const header = [
-    `Active conference: ${snapshot.conference.title} (${snapshot.conference.shortName})`,
+    `Default active conference: ${snapshot.conference.title} (${snapshot.conference.shortName})`,
+    `Available previous conference years: ${(snapshot.pastConferences || [])
+      .map((bundle) => bundle.conference?.year)
+      .filter(Boolean)
+      .join(", ") || "none"}`,
     `Planner reason: ${plan.reason || "lookup required"}`,
     plan.answerStyle ? `Requested answer style: ${plan.answerStyle}` : null,
   ]

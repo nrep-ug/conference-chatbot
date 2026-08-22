@@ -5,6 +5,7 @@ import { qdrant, QDRANT_COLLECTION } from "@/lib/qdrant";
 import {
   getSnapshotPaths,
   readGeneratedRecSnapshot,
+  snapshotToRuntimeData,
 } from "@/lib/rec-snapshot";
 
 export const runtime = "nodejs";
@@ -40,20 +41,38 @@ async function getSnapshotStatus() {
       stat(paths.markdown),
     ]);
 
+    const runtimeSnapshot = snapshotToRuntimeData(snapshot);
+
     return {
       ok: true,
-      generatedAt: snapshot.metadata?.generatedAt,
+      generatedAt: runtimeSnapshot.metadata?.generatedAt,
       conference: {
-        title: snapshot.conference?.title,
-        shortName: snapshot.conference?.shortName,
-        activeConferenceId: snapshot.conference?.$id,
+        title: runtimeSnapshot.conference?.title,
+        shortName: runtimeSnapshot.conference?.shortName,
+        activeConferenceId: runtimeSnapshot.conference?.$id,
       },
       counts: {
-        programs: snapshot.programs?.length || 0,
-        timeBlocks: snapshot.timeBlocks?.length || 0,
-        sessions: snapshot.sessions?.length || 0,
-        sponsorCategories: snapshot.sponsorCategories?.length || 0,
-        sponsors: snapshot.sponsors?.length || 0,
+        programs: runtimeSnapshot.programs?.length || 0,
+        timeBlocks: runtimeSnapshot.timeBlocks?.length || 0,
+        sessions: runtimeSnapshot.sessions?.length || 0,
+        sponsorCategories: runtimeSnapshot.sponsorCategories?.length || 0,
+        sponsors: runtimeSnapshot.sponsors?.length || 0,
+        operationalInfo: runtimeSnapshot.operationalInfo?.length || 0,
+        mediaItems: runtimeSnapshot.mediaItems?.length || 0,
+        reports: runtimeSnapshot.reports?.length || 0,
+        previousConferences: runtimeSnapshot.pastConferences?.length || 0,
+        historicalSessions: (runtimeSnapshot.pastConferences || []).reduce(
+          (total, bundle) => total + (bundle.sessions?.length || 0),
+          0
+        ),
+        historicalMediaItems: (runtimeSnapshot.pastConferences || []).reduce(
+          (total, bundle) => total + (bundle.mediaItems?.length || 0),
+          0
+        ),
+        historicalReports: (runtimeSnapshot.pastConferences || []).reduce(
+          (total, bundle) => total + (bundle.reports?.length || 0),
+          0
+        ),
       },
       files: {
         json: paths.json,

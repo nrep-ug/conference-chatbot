@@ -5,7 +5,8 @@ import { useEffect, useRef, useState } from "react";
 const suggestedQuestions = [
   "How should I prepare for the conference across the 4 days?",
   "Which sessions are relevant to finance and investment?",
-  "What renewable energy technologies may be discussed?",
+  "Show me the official photos from REC24",
+  "Can I download the REC25 conference report?",
   "What happens on Day 3?",
 ];
 
@@ -14,6 +15,8 @@ const capabilityItems = [
   "Venue and halls",
   "Sponsors and partners",
   "Practical preparation",
+  "Previous editions",
+  "Media and reports",
 ];
 
 function Icon({ name, className = "" }) {
@@ -303,6 +306,11 @@ export default function Home() {
   const transcriptRef = useRef(null);
 
   useEffect(() => {
+    if (messages.length === 0) {
+      transcriptRef.current?.scrollTo({ top: 0, behavior: "auto" });
+      return;
+    }
+
     transcriptRef.current?.scrollTo({
       top: transcriptRef.current.scrollHeight,
       behavior: "smooth",
@@ -421,9 +429,9 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-100 text-slate-950">
-      <div className="mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-4 sm:px-6 lg:px-8">
-        <header className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white px-5 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+    <main className="h-dvh overflow-hidden bg-slate-100 text-slate-950">
+      <div className="mx-auto flex h-full min-h-0 max-w-7xl flex-col px-3 py-3 sm:px-6 sm:py-4 lg:px-8">
+        <header className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm sm:px-5 sm:py-4">
           <div className="flex items-center gap-3">
             <div className="flex h-11 w-11 items-center justify-center rounded-md bg-emerald-400 text-slate-950">
               <Icon name="spark" className="h-5 w-5" />
@@ -432,8 +440,8 @@ export default function Home() {
               <h1 className="text-lg font-semibold tracking-normal">
                 REC26 & EXPO Assistant
               </h1>
-              <p className="text-sm text-slate-500">
-                Public conference guidance grounded in the active programme
+              <p className="hidden text-sm text-slate-500 sm:block">
+                Public guidance for REC26 and published previous editions
               </p>
             </div>
           </div>
@@ -445,8 +453,8 @@ export default function Home() {
           </a>
         </header>
 
-        <section className="mt-4 grid flex-1 gap-4 lg:grid-cols-[320px_1fr]">
-          <aside className="rounded-lg border border-slate-200 bg-slate-950 p-5 text-white shadow-sm">
+        <section className="mt-3 grid min-h-0 flex-1 gap-4 sm:mt-4 lg:grid-cols-[320px_1fr]">
+          <aside className="hidden min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-slate-950 p-5 text-white shadow-sm lg:block">
             <div>
               <p className="text-sm font-medium text-emerald-300">Active event</p>
               <h2 className="mt-2 text-2xl font-semibold leading-tight tracking-normal">
@@ -492,14 +500,14 @@ export default function Home() {
             </div>
           </aside>
 
-          <section className="flex min-h-[680px] flex-col rounded-lg border border-slate-200 bg-white shadow-sm">
+          <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 px-5 py-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h2 className="text-base font-semibold">Conversation</h2>
                   <p className="mt-1 text-sm text-slate-500">
-                    Ask about sessions, planning, logistics, sponsors, and
-                    practical preparation.
+                    Ask about sessions, logistics, sponsors, previous editions,
+                    media, reports, and practical preparation.
                   </p>
                 </div>
                 <button
@@ -528,9 +536,9 @@ export default function Home() {
                     <p className="mt-3 text-sm leading-7 text-slate-500">
                       The assistant can answer direct conference facts and also
                       give practical planning guidance when grounded in the
-                      published programme.
+                      published programme and conference archive.
                     </p>
-                    <div className="mt-6 grid gap-2 sm:grid-cols-2">
+                    <div className="mt-6 grid grid-cols-2 gap-2">
                       {suggestedQuestions.map((item) => (
                         <button
                           key={item}

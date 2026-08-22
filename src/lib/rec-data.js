@@ -1,6 +1,10 @@
+import { stat } from "node:fs/promises";
+
 import {
   HR_DATABASE_ID,
   fetchRecSnapshotFromAppwrite,
+  getSnapshotPaths,
+  normalizeSpeakerText,
   readGeneratedRecSnapshot,
   snapshotToRuntimeData,
 } from "./rec-snapshot.js";
@@ -133,6 +137,23 @@ function formatConferenceDates(conference) {
   return `${startDate} to ${endDate}`;
 }
 
+function formatConferenceVenue(conference) {
+  const parts = compact([conference.venue, conference.location])
+    .flatMap((value) => String(value).split(","))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const seen = new Set();
+
+  return parts
+    .filter((part) => {
+      const key = normalizeQuestion(part);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join(", ");
+}
+
 function sourceFor(type, row, label) {
   return {
     source: label,
@@ -143,34 +164,59 @@ function sourceFor(type, row, label) {
   };
 }
 
-function getCache() {
-  if (
-    cachedSnapshot &&
-    Date.now() - cachedSnapshot.createdAt < REC_DATA_CACHE_TTL_MS
-  ) {
-    return cachedSnapshot.data;
+async function readSnapshotFileSignature() {
+  try {
+    const file = await stat(getSnapshotPaths().json);
+    return `${file.mtimeMs}:${file.size}`;
+  } catch {
+    return null;
   }
-
-  return null;
 }
 
-function setCache(data) {
+async function getCache() {
+  if (
+    !cachedSnapshot ||
+    Date.now() - cachedSnapshot.createdAt >= REC_DATA_CACHE_TTL_MS
+  ) {
+    return null;
+  }
+
+  if (cachedSnapshot.snapshotFileSignature) {
+    const currentSignature = await readSnapshotFileSignature();
+
+    if (currentSignature !== cachedSnapshot.snapshotFileSignature) {
+      cachedSnapshot = null;
+      return null;
+    }
+  }
+
+  return cachedSnapshot.data;
+}
+
+function setCache(data, { snapshotFileSignature = null } = {}) {
   cachedSnapshot = {
     createdAt: Date.now(),
     data,
+    snapshotFileSignature,
   };
+}
+
+export function invalidateRecPublicSnapshotCache() {
+  cachedSnapshot = null;
 }
 
 export async function getRecPublicSnapshot({ signal, forceRefresh = false } = {}) {
   if (!forceRefresh) {
-    const cached = getCache();
+    const cached = await getCache();
     if (cached) return cached;
   }
 
   if (!forceRefresh && REC_SNAPSHOT_ENABLED) {
     try {
       const generated = snapshotToRuntimeData(await readGeneratedRecSnapshot());
-      setCache(generated);
+      setCache(generated, {
+        snapshotFileSignature: await readSnapshotFileSignature(),
+      });
       return generated;
     } catch (error) {
       if (REC_SNAPSHOT_STRICT) {
@@ -204,7 +250,7 @@ function buildConferenceDocuments(conference) {
         `Theme: ${conference.theme}`,
         `Description: ${conference.description}`,
         `Dates: ${formatConferenceDates(conference)}`,
-        `Venue: ${conference.venue}, ${conference.location}`,
+        `Venue: ${formatConferenceVenue(conference)}`,
         `Registration: ${conference.registrationOpen ? "open" : "closed"}`,
         conference.regClosedMessage
           ? `Registration closed message: ${conference.regClosedMessage}`
@@ -277,7 +323,12 @@ function buildSessionDocuments(sessions) {
       `Day: ${session.day}`,
       `Time: ${formatTime(session.startTime)} to ${formatTime(session.toTime)}`,
       `Venue: ${session.venueHall}`,
+      session.organizer
+        ? `Organizer: ${stripHtml(session.organizer)}`
+        : null,
+      session.speakers ? `Speakers: ${normalizeSpeakerText(session.speakers)}` : null,
       session.preamble ? `Details: ${stripHtml(session.preamble)}` : null,
+      session.status ? `Status: ${session.status}` : null,
     ]).join("\n"),
   }));
 }
@@ -317,29 +368,122 @@ function buildSponsorDocuments(sponsorCategories, sponsors) {
   ];
 }
 
-export function buildRecDocuments(snapshot) {
-  return [
-    ...buildConferenceDocuments(snapshot.conference),
-    ...buildProgramDocuments(snapshot.programs),
-    ...buildTimeBlockDocuments(snapshot.timeBlocks),
-    ...buildSessionDocuments(snapshot.sessions),
-    ...buildSponsorDocuments(snapshot.sponsorCategories, snapshot.sponsors),
-  ].map((document, index) => ({
-    id: `${document.sourceType}:${document.row?.$id || index}:${index}`,
-    text: document.text,
-    payload: {
-      source: document.title || document.sourceType,
-      sourceType: document.sourceType,
-      databaseId: HR_DATABASE_ID,
-      tableId: document.row?.$tableId,
-      rowId: document.row?.$id,
-      conferenceId: snapshot.conference.$id,
-      year: snapshot.conference.year,
-      title: document.title,
-      text: document.text,
-      updatedAt: document.row?.updatedAt || document.row?.$updatedAt,
-    },
+function buildOperationalInfoDocuments(items) {
+  return items.map((item) => ({
+    sourceType: "operational_info",
+    title: item.title,
+    row: item,
+    text: compact([
+      `Published visitor information: ${item.title}`,
+      `Category: ${item.category}`,
+      `Answer: ${item.answer}`,
+      item.keywords?.length ? `Keywords: ${item.keywords.join(", ")}` : null,
+    ]).join("\n"),
   }));
+}
+
+function buildMediaDocuments(mediaItems) {
+  return mediaItems.map((item) => {
+    const sampleImages = parseJson(item.sampleImagesJson, []);
+
+    return {
+      sourceType: "conference_media",
+      title: item.title,
+      row: item,
+      text: compact([
+        `Published conference media: ${item.title}`,
+        `Type: ${item.mediaType}`,
+        item.description ? `Description: ${stripHtml(item.description)}` : null,
+        item.externalUrl ? `Album or external link: ${item.externalUrl}` : null,
+        item.videoUrl ? `Video link: ${item.videoUrl}` : null,
+        item.thumbnailUrl ? `Thumbnail: ${item.thumbnailUrl}` : null,
+        sampleImages.length
+          ? `Sample image links: ${sampleImages
+              .map((image) => image.url)
+              .filter(Boolean)
+              .join(", ")}`
+          : null,
+      ]).join("\n"),
+    };
+  });
+}
+
+function buildReportDocuments(reports) {
+  return reports.map((report) => ({
+    sourceType: "conference_report",
+    title: report.title,
+    row: report,
+    text: compact([
+      `Published conference report: ${report.title}`,
+      report.reportType ? `Type: ${report.reportType}` : null,
+      report.summary ? `Summary: ${stripHtml(report.summary)}` : null,
+      report.reportUrl ? `Report link: ${report.reportUrl}` : null,
+      report.coverImageUrl ? `Cover image: ${report.coverImageUrl}` : null,
+      report.publicationDate
+        ? `Publication date: ${formatDate(report.publicationDate)}`
+        : null,
+      `Featured: ${report.isFeatured ? "yes" : "no"}`,
+    ]).join("\n"),
+  }));
+}
+
+function getConferenceBundles(snapshot) {
+  return [
+    {
+      conference: snapshot.conference,
+      programs: snapshot.programs || [],
+      timeBlocks: snapshot.timeBlocks || [],
+      sessions: snapshot.sessions || [],
+      sponsorCategories: snapshot.sponsorCategories || [],
+      sponsors: snapshot.sponsors || [],
+      mediaItems: snapshot.mediaItems || [],
+      reports: snapshot.reports || [],
+      operationalInfo: snapshot.operationalInfo || [],
+    },
+    ...(snapshot.pastConferences || []),
+  ];
+}
+
+function buildConferenceBundleDocuments(bundle) {
+  return [
+    ...buildConferenceDocuments(bundle.conference),
+    ...buildProgramDocuments(bundle.programs || []),
+    ...buildTimeBlockDocuments(bundle.timeBlocks || []),
+    ...buildSessionDocuments(bundle.sessions || []),
+    ...buildSponsorDocuments(
+      bundle.sponsorCategories || [],
+      bundle.sponsors || []
+    ),
+    ...buildOperationalInfoDocuments(bundle.operationalInfo || []),
+    ...buildMediaDocuments(bundle.mediaItems || []),
+    ...buildReportDocuments(bundle.reports || []),
+  ];
+}
+
+export function buildRecDocuments(snapshot) {
+  const runtime = snapshotToRuntimeData(snapshot);
+
+  return getConferenceBundles(runtime).flatMap((bundle) =>
+    buildConferenceBundleDocuments(bundle).map((document, index) => ({
+      id: `${bundle.conference.$id}:${document.sourceType}:${
+        document.row?.$id || index
+      }:${index}`,
+      text: document.text,
+      payload: {
+        source: document.title || document.sourceType,
+        sourceType: document.sourceType,
+        databaseId: HR_DATABASE_ID,
+        tableId: document.row?.$tableId,
+        rowId: document.row?.$id,
+        conferenceId: bundle.conference.$id,
+        isActiveConference: bundle.conference.isActive === true,
+        year: bundle.conference.year,
+        title: document.title,
+        text: document.text,
+        updatedAt: document.row?.updatedAt || document.row?.$updatedAt,
+      },
+    }))
+  );
 }
 
 function answerSponsors(snapshot) {
@@ -648,7 +792,7 @@ function answerDayDate(snapshot, dayNumber) {
 }
 
 function cleanSpeakerText(value) {
-  return stripHtml(value)
+  return normalizeSpeakerText(value)
     .replace(/\b(details?\s+forthcoming|to be confirmed)\b/gi, (match) =>
       match.toLowerCase()
     )
@@ -770,6 +914,155 @@ function answerLearningOutcomes(snapshot) {
   ]);
 }
 
+function isProgrammeProgressionQuestion(normalized) {
+  return (
+    /\bhow\b.*\b(sessions?|themes?|days?|programme|program|agenda)\b.*\b(connect|relate|build|progress|fit together)\b/.test(
+      normalized
+    ) ||
+    /\b(progress|progression|journey)\b.*\b(across|through|from)\b.*\b(days?|programme|program|agenda)\b/.test(
+      normalized
+    )
+  );
+}
+
+function getDayProgressionRole(theme) {
+  const normalizedTheme = normalizeQuestion(theme);
+
+  if (/policy|investment|finance/.test(normalizedTheme)) {
+    return "sets the policy, finance and institutional foundation";
+  }
+  if (/technology|innovation/.test(normalizedTheme)) {
+    return "moves into technologies, skills, market models and innovation";
+  }
+  if (/implementation|sustainability/.test(normalizedTheme)) {
+    return "shifts from ideas into delivery, adoption and sustainable operation";
+  }
+  if (/impact|scale|regional|leadership/.test(normalizedTheme)) {
+    return "focuses on evidence, scale-up and leadership beyond individual projects";
+  }
+
+  return `develops the programme's ${theme || "published focus"}`;
+}
+
+function getProgressionSessionHighlights(snapshot, dayNumber) {
+  return uniqueValues(
+    snapshot.sessions
+      .filter((session) => session.day === dayNumber)
+      .sort(
+        (a, b) =>
+          Number(/\btbc\b/i.test(a.title || "")) -
+            Number(/\btbc\b/i.test(b.title || "")) ||
+          new Date(a.startTime) - new Date(b.startTime)
+      )
+      .map((session) => stripHtml(session.title))
+      .filter(Boolean)
+  ).slice(0, 3);
+}
+
+function answerProgrammeProgression(snapshot) {
+  const days = getConferenceDays(snapshot.conference);
+  const dayRows = days.map((day, index) => {
+    const dayNumber = getDayNumberFromDay(day, index);
+    const highlights = getProgressionSessionHighlights(snapshot, dayNumber);
+    const examples = highlights.length > 0
+      ? ` Published examples include ${highlights.join("; ")}.`
+      : "";
+
+    return `**Day ${dayNumber} - ${day.theme}:** ${getDayProgressionRole(
+      day.theme
+    )}.${examples}`;
+  });
+
+  return joinMarkdownSections([
+    `The published ${snapshot.conference.shortName || snapshot.conference.title} programme forms a four-stage progression rather than four disconnected agendas:`,
+    markdownList(dayRows),
+    "Taken together, the sequence moves from the enabling environment, through technologies and delivery, to impact and scale. This is a thematic interpretation of the published daily focus areas and session titles; parallel sessions are not necessarily direct continuations of one another.",
+  ]);
+}
+
+function isProgrammeTradeOffQuestion(normalized) {
+  return /\b(trade[- ]?offs?|strategic tensions?|competing priorities|balance between)\b/.test(
+    normalized
+  );
+}
+
+function getSessionEvidence(snapshot, pattern, limit = 2) {
+  return snapshot.sessions
+    .filter((session) =>
+      pattern.test(
+        normalizeQuestion(
+          compact([
+            session.title,
+            session.theme,
+            stripHtml(session.preamble),
+          ]).join(" ")
+        )
+      )
+    )
+    .slice(0, limit);
+}
+
+function formatSessionEvidence(sessions) {
+  return sessions.map((session) => `**${stripHtml(session.title)}**`).join(" and ");
+}
+
+function getProgrammeTradeOffEvidence(snapshot) {
+  const seen = new Set();
+
+  return [
+    ...getSessionEvidence(snapshot, /financ|investment|tax|deal room/, 3),
+    ...getSessionEvidence(snapshot, /refugee|farmer|grassroots|student|universal access/, 3),
+    ...getSessionEvidence(snapshot, /e-mobility|wind|solar|biofuel|clean cooking/, 3),
+    ...getSessionEvidence(snapshot, /skills gap|performance review|technical working group/, 3),
+  ].filter((session) => {
+    const key = session.$id || session.title;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function answerProgrammeTradeOffs(snapshot) {
+  const finance = getSessionEvidence(snapshot, /financ|investment|tax|deal room/, 2);
+  const inclusion = getSessionEvidence(
+    snapshot,
+    /refugee|farmer|grassroots|student|universal access/,
+    2
+  );
+  const technologies = getSessionEvidence(
+    snapshot,
+    /e-mobility|wind|solar|biofuel|clean cooking/,
+    2
+  );
+  const delivery = getSessionEvidence(
+    snapshot,
+    /skills gap|performance review|technical working group|implementation/,
+    2
+  );
+  const halls = uniqueValues(
+    snapshot.sessions.map((session) => session.venueHall).filter(Boolean)
+  );
+
+  return joinMarkdownSections([
+    "The programme does not publish an official list of strategic trade-offs. Based on its daily themes and session titles, these are reasonable planning interpretations:",
+    markdownList([
+      `**Breadth versus depth:** ${snapshot.sessions.length} sessions across ${halls.length} listed spaces create broad coverage, but several run in parallel, so attendees must prioritize rather than follow every topic.`,
+      `**Investment momentum versus inclusive access:** ${formatSessionEvidence(
+        finance
+      ) || "the finance-focused sessions"} emphasize capital and investment conditions, while ${formatSessionEvidence(
+        inclusion
+      ) || "the inclusion-focused sessions"} keep access, communities and end users in view.`,
+      `**Technology ambition versus delivery capacity:** ${formatSessionEvidence(
+        technologies
+      ) || "the technology sessions"} explore solution pathways, while ${formatSessionEvidence(
+        delivery
+      ) || "the delivery-focused sessions"} point to skills, institutions and implementation capacity needed to sustain them.`,
+      "**Immediate deals versus long-term system change:** deal rooms, business forums and taxation discussions can support near-term transactions, while the four-day progression also reserves space for policy, programme performance, sustainability, local voices and regional scale.",
+    ]),
+    "These are inferences from the published programme, not positions formally stated by the organizers.",
+  ]);
+}
+
 function answerConferenceOverview(snapshot) {
   const days = getConferenceDays(snapshot.conference);
   const dayThemes = days
@@ -783,7 +1076,7 @@ function answerConferenceOverview(snapshot) {
     `${snapshot.conference.title} (${snapshot.conference.shortName}) is Uganda's premier renewable energy conference for ${snapshot.conference.year}.`,
     markdownDetails([
       ["Dates", formatConferenceDates(snapshot.conference)],
-      ["Venue", `${snapshot.conference.venue}, ${snapshot.conference.location}`],
+      ["Venue", formatConferenceVenue(snapshot.conference)],
       ["Theme", `"${snapshot.conference.theme}"`],
     ]),
     dayThemes.length ? `**Daily focus areas**\n${markdownList(dayThemes)}` : null,
@@ -816,7 +1109,7 @@ function answerConferenceDeepDive(snapshot) {
     `${snapshot.conference.title} (${snapshot.conference.shortName}) is the active REC conference for ${snapshot.conference.year}.`,
     markdownDetails([
       ["Dates", formatConferenceDates(snapshot.conference)],
-      ["Venue", `${snapshot.conference.venue}, ${snapshot.conference.location}`],
+      ["Venue", formatConferenceVenue(snapshot.conference)],
       ["Theme", `"${snapshot.conference.theme}"`],
     ]),
     dayThemes.length ? `**Daily focus areas**\n${markdownList(dayThemes)}` : null,
@@ -836,7 +1129,7 @@ function answerConferenceDeepDive(snapshot) {
 }
 
 function answerConferenceDatesAndVenue(snapshot) {
-  return `${snapshot.conference.title} will run from **${formatConferenceDates(snapshot.conference)}** at **${snapshot.conference.venue}, ${snapshot.conference.location}**.`;
+  return `${snapshot.conference.title} will run from **${formatConferenceDates(snapshot.conference)}** at **${formatConferenceVenue(snapshot.conference)}**.`;
 }
 
 function findFirstScheduledBlock(snapshot) {
@@ -918,7 +1211,7 @@ function answerProgramOverview(snapshot) {
     });
 
   return joinMarkdownSections([
-    `${snapshot.conference.shortName || snapshot.conference.title} is a ${days.length || program?.daysCount || ""}-day programme at ${snapshot.conference.venue}, ${snapshot.conference.location}.`,
+    `${snapshot.conference.shortName || snapshot.conference.title} is a ${days.length || program?.daysCount || ""}-day programme at ${formatConferenceVenue(snapshot.conference)}.`,
     `**Conference theme:** ${snapshot.conference.theme}`,
     daySummary.length ? `**Daily focus**\n${markdownList(daySummary)}` : null,
     `The published data currently lists ${snapshot.sessions.length} programme sessions and ${snapshot.timeBlocks.length} time blocks.`,
@@ -1338,6 +1631,37 @@ function isConferenceOverviewQuestion(normalized) {
   );
 }
 
+function isFocusedConferenceFactQuestion(normalized) {
+  const asksForOverview =
+    /\b(overview|summary|summarise|summarize|tell me more|in depth|in-depth|deep dive|detailed|comprehensive|describe|introduce)\b/.test(
+      normalized
+    );
+
+  return (
+    !asksForOverview &&
+    /\b(theme|dates?|venue|location|registration|website|contact|phone|email|capacity|fees?|cost|price)\b/.test(
+      normalized
+    )
+  );
+}
+
+function isOpenEndedSynthesisQuestion(normalized) {
+  const asksForSynthesis =
+    /\b(compare|contrast|trade[- ]?offs?|interplay|relationship between|strategic implications?|patterns? across|synthesi[sz]e|analy[sz]e)\b/.test(
+      normalized
+    ) ||
+    /\bhow\b.*\b(sessions?|themes?|days?|programme|program|agenda)\b.*\b(connect|relate|build|progress)\b/.test(
+      normalized
+    );
+
+  return (
+    asksForSynthesis &&
+    /\b(conference|rec|expo|sessions?|themes?|days?|programme|program|agenda)\b/.test(
+      normalized
+    )
+  );
+}
+
 function isDayDateQuestion(normalized) {
   return (
     /\b(on )?which date\b/.test(normalized) ||
@@ -1381,7 +1705,7 @@ function groupRecommendedSessions(sessions) {
   for (const session of sessions) {
     const key = normalizeQuestion(session.title || session.$id);
     const group = groups.get(key) || {
-      title: session.title,
+      title: stripHtml(session.title),
       theme: session.theme,
       venue: session.venueHall,
       sessions: [],
@@ -1557,7 +1881,7 @@ function formatRecommendedSessions(sessions) {
   const items = sessions
     .map((session) =>
       compact([
-        session.title,
+        stripHtml(session.title),
         `Day ${session.day}`,
         session.venueHall,
         session.startTime && session.toTime
@@ -1664,12 +1988,23 @@ function getTopicRecommendationMatches(snapshot, normalized) {
     .filter((match) => match.sessions.length > 0);
 }
 
-function answerTopicRecommendation(match) {
+function answerTopicRecommendation(match, { recommendation = true } = {}) {
   return joinMarkdownSections([
-    `For ${match.profile.label}, I would prioritize:`,
+    recommendation
+      ? `For ${match.profile.label}, I would prioritize:`
+      : `Published sessions related to ${match.profile.label}:`,
     formatRecommendedSessions(match.sessions),
     match.profile.rationale,
   ]);
+}
+
+function isTopicSessionQuestion(normalized) {
+  return (
+    /\bsessions?\b/.test(normalized) &&
+    /\b(about|related|connected|relevant|mention|mentions|cover|covering|focused|focus|for|tell|list|show|which|what)\b/.test(
+      normalized
+    )
+  );
 }
 
 const TECHNOLOGY_DISCUSSION_AREAS = [
@@ -1775,25 +2110,24 @@ function isTopicRecommendationQuestion(normalized) {
   );
 }
 
-function findCeremonyBlock(snapshot, normalized) {
-  const ceremonyType = /\bclosing ceremony\b|\bclosing\b/.test(normalized)
-    ? "closing"
-    : /\bopening ceremony\b|\bopening\b/.test(normalized)
-      ? "opening"
-      : null;
+function findCeremonyBlocks(snapshot, normalized) {
+  const requestedTypes = [
+    /\bopening ceremony\b|\bopening\b/.test(normalized) ? "opening" : null,
+    /\bclosing ceremony\b|\bclosing\b/.test(normalized) ? "closing" : null,
+  ].filter(Boolean);
 
-  if (!ceremonyType) return null;
+  if (requestedTypes.length === 0) return [];
 
-  return snapshot.timeBlocks.find((block) => {
+  return snapshot.timeBlocks.filter((block) => {
     const label = normalizeQuestion(block.label || "");
     const type = normalizeQuestion(block.type || "");
 
     return (
       type === "ceremony" &&
-      label.includes(ceremonyType) &&
+      requestedTypes.some((ceremonyType) => label.includes(ceremonyType)) &&
       label.includes("ceremony")
     );
-  });
+  }).sort((a, b) => a.day - b.day || (a.startMinutes || 0) - (b.startMinutes || 0));
 }
 
 function answerCeremonyBlock(snapshot, block) {
@@ -1888,6 +2222,17 @@ function answerTimeBlocksByType(snapshot, type, label) {
     `Yes. The listed ${label} blocks are:`,
     markdownList(summary),
   ]);
+}
+
+function isExhibitionScheduleQuestion(normalized) {
+  const mentionsExhibition =
+    /\b(?:exhibitions?|exhibit|expo blocks?|expo area)\b/.test(normalized);
+
+  if (!mentionsExhibition) return false;
+
+  return /\b(?:are there|when|where|what time|hours?|schedule|scheduled|blocks?|open|opens|start|starts|end|ends|run|runs|happen|happens|available)\b/.test(
+    normalized
+  );
 }
 
 function getSessionDurationMinutes(session) {
@@ -2007,6 +2352,752 @@ function answerBeginnerGuidance(snapshot) {
   ]);
 }
 
+const OPERATIONAL_MATCH_STOP_WORDS = new Set([
+  "about",
+  "available",
+  "conference",
+  "details",
+  "event",
+  "information",
+  "provided",
+  "visitor",
+  "venue",
+]);
+
+function canonicalSearchText(value) {
+  return normalizeQuestion(value)
+    .replace(/wi[- ]?fi/g, "wifi")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function operationalItemSearchText(item) {
+  return canonicalSearchText(
+    compact([
+      item.title,
+      item.category,
+      ...(Array.isArray(item.keywords) ? item.keywords : []),
+      item.answer,
+    ]).join(" ")
+  );
+}
+
+function getOperationalInfoMatches(normalized, snapshot) {
+  const question = canonicalSearchText(normalized);
+  const questionTokens = new Set(question.split(" ").filter(Boolean));
+
+  return (snapshot.operationalInfo || [])
+    .map((item) => {
+      const title = canonicalSearchText(item.title);
+      const keywords = (item.keywords || [])
+        .map(canonicalSearchText)
+        .filter(Boolean);
+      const titleTokens = title
+        .split(" ")
+        .filter(
+          (token) => token.length >= 3 && !OPERATIONAL_MATCH_STOP_WORDS.has(token)
+        );
+      let score = 0;
+
+      if (title.length >= 3 && question.includes(title)) score += 12;
+
+      for (const keyword of keywords) {
+        if (keyword.length >= 3 && question.includes(keyword)) score += 8;
+      }
+
+      for (const token of titleTokens) {
+        if (questionTokens.has(token)) score += 4;
+      }
+
+      return { item, score };
+    })
+    .filter((match) => match.score >= 4)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 5);
+}
+
+function answerOperationalInfo(matches) {
+  return joinMarkdownSections(
+    matches.map(({ item }) =>
+      joinMarkdownSections([`**${item.title}**`, item.answer])
+    )
+  );
+}
+
+function getPublishedLogisticsLabels(matches) {
+  return new Set(
+    UNPUBLISHED_LOGISTICS_TOPICS.filter((topic) =>
+      matches.some(({ item }) => topic.pattern.test(operationalItemSearchText(item)))
+    ).map((topic) => topic.label)
+  );
+}
+
+function conferenceYear(bundle) {
+  return Number(
+    bundle.conference?.year || String(bundle.conference?.startDate || "").slice(0, 4)
+  );
+}
+
+function extractRequestedConferenceYears(normalized) {
+  const years = new Set(
+    [...normalized.matchAll(/\b(20\d{2})\b/g)].map((match) => Number(match[1]))
+  );
+
+  for (const match of normalized.matchAll(/\brec\s*[-']?\s*(\d{2})\b/g)) {
+    years.add(2000 + Number(match[1]));
+  }
+
+  return years;
+}
+
+function isConferenceMediaQuestion(normalized) {
+  return /\b(photo|photos|image|images|album|albums|gallery|galleries|media|video|videos|recording|recordings|highlights)\b/.test(
+    normalized
+  );
+}
+
+const CONFERENCE_REPORT_PATTERN =
+  /\b(report|reports|document|documents|publication|publications|proceedings|communique|communiques|pdf|pdfs)\b|\bpublished outcomes?\b/;
+
+function isConferenceReportQuestion(normalized) {
+  return CONFERENCE_REPORT_PATTERN.test(normalized);
+}
+
+function isHistoricalThemeEvolutionQuestion(normalized) {
+  const asksAboutThemes = /\bthemes?\b/.test(normalized);
+  const asksAcrossEditions =
+    /\b(evolv(?:e|ed|ing|ution)|chang(?:e|ed|ing)|progress(?:ion|ed|ing)?|develop(?:ed|ment)?|trend|patterns?|over time|year[- ]to[- ]year)\b/.test(
+      normalized
+    ) ||
+    /\b(across|through|between|among)\b.*\b(editions?|years?|conferences?)\b/.test(
+      normalized
+    ) ||
+    /\bavailable conference editions?\b/.test(normalized);
+
+  return asksAboutThemes && asksAcrossEditions;
+}
+
+function hasHistoricalConferenceScope(normalized, snapshot) {
+  const activeYear = conferenceYear(snapshot);
+  const requestedYears = extractRequestedConferenceYears(normalized);
+
+  return (
+    [...requestedYears].some((year) => year !== activeYear) ||
+    /\b(previous|past|historical|history|archive|archived|earlier|former|prior)\b/.test(
+      normalized
+    )
+  );
+}
+
+function selectConferenceBundles(normalized, snapshot) {
+  const bundles = getConferenceBundles(snapshot);
+  const requestedYears = extractRequestedConferenceYears(normalized);
+  const includesCurrent =
+    /\b(current|active|this year|rec\s*[-']?\s*26|2026)\b/.test(
+      normalized
+    );
+
+  if (requestedYears.size > 0) {
+    const selected = bundles.filter((bundle) =>
+      requestedYears.has(conferenceYear(bundle))
+    );
+
+    if (
+      includesCurrent &&
+      !selected.some((bundle) => bundle.conference.isActive === true)
+    ) {
+      selected.unshift(bundles[0]);
+    }
+
+    return selected;
+  }
+
+  const past = bundles
+    .slice(1)
+    .sort((left, right) => conferenceYear(right) - conferenceYear(left));
+
+  if (/\b(previous|last|most recent prior) conference\b/.test(normalized)) {
+    return includesCurrent ? [bundles[0], ...past.slice(0, 1)] : past.slice(0, 1);
+  }
+
+  if (
+    /\b(previous|past|historical|history|archive|archived|earlier|former|prior)\b/.test(
+      normalized
+    )
+  ) {
+    return includesCurrent ? [bundles[0], ...past] : past;
+  }
+
+  if (isConferenceMediaQuestion(normalized)) {
+    if (includesCurrent) return [bundles[0]];
+
+    const withMedia = bundles.filter((bundle) => bundle.mediaItems?.length > 0);
+    return withMedia.length > 0 ? withMedia : [bundles[0]];
+  }
+
+  if (isConferenceReportQuestion(normalized)) {
+    if (includesCurrent) return [bundles[0]];
+
+    const withReports = bundles.filter((bundle) => bundle.reports?.length > 0);
+    return withReports.length > 0 ? withReports : [bundles[0]];
+  }
+
+  return [bundles[0]];
+}
+
+function splitIntentClauses(normalized) {
+  return normalized
+    .split(
+      /[?;,]+|\.(?:\s|$)|\b(?:and then|plus also|on the other hand)\b|\band\s+(?=(?:tell|show|list|give|what|when|where|who|is|are|can|does|compare|check)\b)/
+    )
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+}
+
+function getIntentConferenceScope(normalized, pattern) {
+  const clauses = splitIntentClauses(normalized);
+  const matchingClauses = clauses.filter((clause) =>
+    pattern.test(clause)
+  );
+  const yearOnlyContinuationClauses = clauses.filter((clause) => {
+    if (matchingClauses.includes(clause)) return false;
+    if (extractRequestedConferenceYears(clause).size === 0) return false;
+
+    const remainder = clause
+      .replace(/\brec\s*[-']?\s*\d{2}\b/g, " ")
+      .replace(/\b20\d{2}\b/g, " ")
+      .replace(/\b(and|or|with|edition|editions|year|years)\b/g, " ")
+      .replace(/[^a-z0-9]+/g, "")
+      .trim();
+
+    return remainder.length === 0;
+  });
+  const scopedClauses = [...matchingClauses, ...yearOnlyContinuationClauses];
+  const years = new Set(
+    scopedClauses.flatMap((clause) => [
+      ...extractRequestedConferenceYears(clause),
+    ])
+  );
+
+  return {
+    years,
+    activeOnly: scopedClauses.some((clause) =>
+      /\b(current|active|this year)\b/.test(clause)
+    ),
+    historicalOnly: scopedClauses.some((clause) =>
+      /\b(previous|past|historical|archived|earlier|prior)\b/.test(clause)
+    ),
+  };
+}
+
+function bundleMatchesIntentScope(bundle, scope) {
+  if (scope.years.size > 0) {
+    return scope.years.has(conferenceYear(bundle));
+  }
+
+  if (scope.activeOnly) return bundle.conference.isActive === true;
+  if (scope.historicalOnly) return bundle.conference.isActive !== true;
+
+  return true;
+}
+
+function isExplicitConferenceLocationQuestion(normalized) {
+  if (/\b(where|location|held|take place|venue address)\b/.test(normalized)) {
+    return true;
+  }
+
+  return (
+    /\bvenue\b/.test(normalized) &&
+    getUnpublishedLogisticsTopics(normalized).length === 0 &&
+    (/\b(what|which|name|address|conference|compare|contrast|expo)\b/.test(
+      normalized
+    ) ||
+      /\brec\s*[-']?\s*\d{2}\b/.test(normalized))
+  );
+}
+
+function formatEditionSessions(bundle, requestedDays, { speakersOnly = false } = {}) {
+  const sessions = (bundle.sessions || [])
+    .filter(
+      (session) => requestedDays.length === 0 || requestedDays.includes(session.day)
+    )
+    .sort(
+      (left, right) =>
+        left.day - right.day || new Date(left.startTime) - new Date(right.startTime)
+    );
+
+  if (sessions.length === 0) {
+    return "No eligible historical sessions are available in the current public snapshot for this edition.";
+  }
+
+  const sessionsByDay = new Map();
+  for (const session of sessions) {
+    const list = sessionsByDay.get(session.day) || [];
+    list.push(session);
+    sessionsByDay.set(session.day, list);
+  }
+
+  return [...sessionsByDay]
+    .map(([day, daySessions]) => {
+      const items = daySessions.map((session) => {
+        const speakers = normalizeSpeakerText(session.speakers);
+
+        if (speakersOnly) {
+          return `**${session.title}:** ${speakers || "Speakers are not yet published."}`;
+        }
+
+        const timing = compact([
+          session.startTime ? formatTime(session.startTime) : null,
+          session.toTime ? formatTime(session.toTime) : null,
+        ]).join(" to ");
+        const details = compact([timing, session.venueHall]).join(", ");
+
+        return `**${session.title}**${details ? ` (${details})` : ""}`;
+      });
+
+      return `**Day ${day}**\n${markdownList(items)}`;
+    })
+    .join("\n\n");
+}
+
+function formatEditionSponsors(bundle, { partnersOnly = false } = {}) {
+  const categories = new Map(
+    (bundle.sponsorCategories || []).map((category) => [category.$id, category.name])
+  );
+  const sponsors = (bundle.sponsors || [])
+    .filter((sponsor) => sponsor.isActive !== false)
+    .filter((sponsor) => {
+      if (!partnersOnly) return true;
+      return canonicalSearchText(categories.get(sponsor.categoryId)) === "partners";
+    });
+
+  if (sponsors.length === 0) {
+    return partnersOnly
+      ? "No published partners are listed for this edition."
+      : "No published sponsors are listed for this edition.";
+  }
+
+  return markdownList(
+    sponsors.map((sponsor) => {
+      const category = categories.get(sponsor.categoryId);
+      const label = category ? `${sponsor.name} (${category})` : sponsor.name;
+      return sponsor.siteUrl ? `[${label}](${sponsor.siteUrl})` : label;
+    })
+  );
+}
+
+function formatEditionMedia(bundle) {
+  const mediaItems = bundle.mediaItems || [];
+
+  if (mediaItems.length === 0) {
+    return "No published media items are currently listed for this edition.";
+  }
+
+  return mediaItems
+    .map((item) => {
+      const primaryUrl = item.externalUrl || item.videoUrl || item.thumbnailUrl;
+      const primaryLinkLabel = item.mediaType === "video" ? "Watch video" : "Open album";
+      const sampleImages = parseJson(item.sampleImagesJson, [])
+        .map((image) => image.url)
+        .filter(Boolean)
+        .slice(0, 3);
+
+      return joinMarkdownSections([
+        `**${item.title}**${item.mediaType ? ` (${item.mediaType})` : ""}`,
+        item.description ? stripHtml(item.description) : null,
+        primaryUrl ? `[${primaryLinkLabel}](${primaryUrl})` : null,
+        item.videoUrl && item.videoUrl !== primaryUrl
+          ? `[Watch video](${item.videoUrl})`
+          : null,
+        sampleImages.length > 0
+          ? `Sample images: ${sampleImages
+              .map((url, index) => `[Image ${index + 1}](${url})`)
+              .join(" | ")}`
+          : null,
+      ]);
+    })
+    .join("\n\n");
+}
+
+const REPORT_TYPE_LABELS = {
+  conference_report: "conference report",
+  proceedings: "proceedings document",
+  outcomes: "outcomes report",
+  communique: "communique",
+  other: "other report",
+};
+
+function extractRequestedReportTypes(normalized) {
+  const types = new Set();
+
+  if (/\bconference\s+reports?\b/.test(normalized)) {
+    types.add("conference_report");
+  }
+  if (/\bproceedings\b/.test(normalized)) types.add("proceedings");
+  if (/\bcommuniques?\b/.test(normalized)) types.add("communique");
+  if (/\b(?:published\s+outcomes?|outcomes?\s+(?:report|document)s?)\b/.test(normalized)) {
+    types.add("outcomes");
+  }
+
+  return [...types];
+}
+
+function selectEditionReports(bundle, requestedTypes = []) {
+  return [...(bundle.reports || [])]
+    .filter(
+      (report) =>
+        requestedTypes.length === 0 || requestedTypes.includes(report.reportType)
+    )
+    .sort(
+    (left, right) =>
+      (left.displayOrder || 0) - (right.displayOrder || 0) ||
+      String(left.title || "").localeCompare(String(right.title || ""))
+  );
+}
+
+function formatEditionReports(bundle, requestedTypes = []) {
+  const reports = selectEditionReports(bundle, requestedTypes);
+
+  if (reports.length === 0) {
+    if (requestedTypes.length > 0) {
+      const requestedLabels = requestedTypes
+        .map((type) => REPORT_TYPE_LABELS[type] || type.replace(/_/g, " "))
+        .join(" or ");
+
+      return `I could not find a published ${requestedLabels} for this edition.`;
+    }
+
+    return "No published report or conference document is currently listed for this edition.";
+  }
+
+  return reports
+    .map((report) => {
+      const reportType = String(report.reportType || "conference report")
+        .replace(/_/g, " ")
+        .trim();
+
+      return joinMarkdownSections([
+        `**${report.title}**${reportType ? ` (${reportType})` : ""}`,
+        report.summary ? stripHtml(report.summary) : null,
+        report.reportUrl ? `[Open report](${report.reportUrl})` : null,
+        report.publicationDate
+          ? `Published: ${formatDate(report.publicationDate)}`
+          : null,
+      ]);
+    })
+    .join("\n\n");
+}
+
+function answerHistoricalThemeEvolution(normalized, snapshot) {
+  const bundles = getConferenceBundles(snapshot)
+    .filter((bundle) => Number.isFinite(conferenceYear(bundle)))
+    .sort((left, right) => conferenceYear(left) - conferenceYear(right));
+  const themedBundles = bundles.filter((bundle) => bundle.conference?.theme);
+
+  if (themedBundles.length < 2) {
+    return answerConferenceEditions(normalized, snapshot);
+  }
+
+  const first = themedBundles[0];
+  const latest = themedBundles[themedBundles.length - 1];
+  const intermediateThemes = themedBundles
+    .slice(1, -1)
+    .map((bundle) => bundle.conference.theme)
+    .join(" ")
+    .toLowerCase();
+  const recurringIdeas = [
+    ["clean-energy access", /clean energy|energy access/],
+    ["livelihoods", /livelihood/],
+    ["energy systems", /energy systems?/],
+    ["industrialisation", /industriali[sz]ation/],
+    ["conservation", /conservation/],
+  ]
+    .filter(([, pattern]) => pattern.test(intermediateThemes))
+    .map(([label]) => label);
+  const naturalRecurringIdeas =
+    recurringIdeas.length > 1
+      ? `${recurringIdeas.slice(0, -1).join(", ")} and ${recurringIdeas.at(-1)}`
+      : recurringIdeas[0] || "";
+  const displayTheme = (theme) => String(theme || "").replace(/,(?=\S)/g, ", ");
+  const currentDays = parseJson(snapshot.conference?.days, []);
+  const sources = themedBundles.map((bundle) =>
+    sourceFor(
+      "conference_overview",
+      bundle.conference,
+      bundle.conference.shortName || bundle.conference.title
+    )
+  );
+  const sections = [
+    "The published REC themes show this progression:",
+    markdownList(
+      themedBundles.map(
+        (bundle) => {
+          const year = conferenceYear(bundle);
+          const edition = bundle.conference.shortName || `REC${String(year).slice(-2)}`;
+
+          return `**${year} (${edition}):** ${displayTheme(bundle.conference.theme)}`;
+        }
+      )
+    ),
+    `**Grounded interpretation:** The theme wording moves from **${displayTheme(first.conference.theme)}** in ${conferenceYear(
+      first
+    )} toward **${displayTheme(latest.conference.theme)}** in ${conferenceYear(latest)}${
+      recurringIdeas.length > 0
+        ? `, while the intervening editions repeatedly emphasize ${naturalRecurringIdeas}`
+        : ""
+    }. This suggests a broad shift from establishing renewable energy's role in development toward implementing connected energy systems and scaling their contribution to a green economy. This is an interpretation of the published themes, not a separate statement from the organizers.`,
+  ];
+
+  if (
+    /\b(first[- ]time|new attendee|new to|attendee|prepare|preparation|what.*suggest)\b/.test(
+      normalized
+    )
+  ) {
+    sections.push(
+      joinMarkdownSections([
+        "**What this means for a first-time attendee:**",
+        currentDays.length > 0
+          ? markdownList(
+              currentDays.map(
+                (day, index) =>
+                  `**${day.label || `Day ${index + 1}`}:** ${day.theme || "Focus not published"}`
+              )
+            )
+          : null,
+        "Start by identifying the current-day themes most relevant to your role, then choose published sessions within those days. Keep notes under policy, technology, implementation, and scale so the four days form one learning path rather than isolated sessions.",
+      ])
+    );
+  }
+
+  return {
+    answer: joinMarkdownSections(sections),
+    sources: uniqueSources(sources),
+  };
+}
+
+function answerConferenceEditions(normalized, snapshot) {
+  const selected = selectConferenceBundles(normalized, snapshot);
+  const availableYears = getConferenceBundles(snapshot)
+    .map(conferenceYear)
+    .filter(Number.isFinite)
+    .sort((left, right) => right - left);
+
+  if (selected.length === 0) {
+    return {
+      answer: `I could not find that REC edition. Available conference years are ${availableYears.join(", ")}.`,
+      sources: [
+        sourceFor(
+          "conference_overview",
+          snapshot.conference,
+          snapshot.conference.title
+        ),
+      ],
+    };
+  }
+
+  const requestedDays = extractRequestedDays(normalized);
+  const asksMedia = isConferenceMediaQuestion(normalized);
+  const asksReports = isConferenceReportQuestion(normalized);
+  const requestedReportTypes = extractRequestedReportTypes(normalized);
+  const asksSpeakers = isSpeakerQuestion(normalized);
+  const asksSessions =
+    asksSpeakers ||
+    /\b(session|sessions|program|programme|agenda|schedule|happen|happened)\b/.test(
+      normalized
+    );
+  const asksSponsors = /\bsponsor|sponsors\b/.test(normalized);
+  const asksPartners = /\bpartner|partners\b/.test(normalized);
+  const asksTheme = /\btheme|themes\b/.test(normalized);
+  const asksVenue = isExplicitConferenceLocationQuestion(normalized);
+  const asksDates = /\b(when|date|dates|start|started|end|ended)\b/.test(normalized);
+  const operationalMatches = getOperationalInfoMatches(normalized, snapshot);
+  const publishedLogisticsLabels = getPublishedLogisticsLabels(
+    operationalMatches
+  );
+  const unresolvedLogisticsTopics = getUnpublishedLogisticsTopics(
+    normalized
+  ).filter((label) => !publishedLogisticsLabels.has(label));
+  const mediaScope = getIntentConferenceScope(
+    normalized,
+    /\b(photo|photos|image|images|album|albums|gallery|galleries|media|video|videos|recording|recordings|highlights)\b/
+  );
+  const reportScope = getIntentConferenceScope(
+    normalized,
+    CONFERENCE_REPORT_PATTERN
+  );
+  const sessionScope = getIntentConferenceScope(
+    normalized,
+    /\b(session|sessions|program|programme|agenda|schedule|happen|happened|speaker|speakers|presenter|presenters|panelist|panelists)\b/
+  );
+  const sponsorScope = getIntentConferenceScope(
+    normalized,
+    /\b(sponsor|sponsors|partner|partners)\b/
+  );
+  const themeScope = getIntentConferenceScope(normalized, /\btheme|themes\b/);
+  const venueScope = getIntentConferenceScope(
+    normalized,
+    /\b(where|venue|location|held|take place)\b/
+  );
+  const dateScope = getIntentConferenceScope(
+    normalized,
+    /\b(when|date|dates|start|started|end|ended)\b/
+  );
+  const logisticsScope = getIntentConferenceScope(
+    normalized,
+    /\b(wi[- ]?fi|internet|parking|accommodation|lodging|shuttle|airport transfer|dress code|attire|visa|accessibility|wheelchair|certificate|breakfast|dinner|childcare|charging|prayer room|first aid|medical|bag policy|security)\b/
+  );
+  const hasFocusedRequest =
+    asksMedia ||
+    asksReports ||
+    asksSessions ||
+    asksSponsors ||
+    asksPartners ||
+    asksTheme ||
+    asksVenue ||
+    asksDates ||
+    operationalMatches.length > 0 ||
+    unresolvedLogisticsTopics.length > 0;
+  const sources = [];
+  const sections = selected.map((bundle) => {
+    const conference = bundle.conference;
+    const year = conferenceYear(bundle);
+    const facts = [];
+
+    sources.push(sourceFor("conference_overview", conference, conference.title));
+
+    if (
+      !hasFocusedRequest ||
+      (asksDates && bundleMatchesIntentScope(bundle, dateScope))
+    ) {
+      facts.push(`**Dates:** ${formatConferenceDates(conference) || "Not published"}`);
+    }
+    if (
+      !hasFocusedRequest ||
+      (asksTheme && bundleMatchesIntentScope(bundle, themeScope))
+    ) {
+      facts.push(
+        `**Theme:** ${String(conference.theme || "Not published").replace(
+          /,(?=\S)/g,
+          ", "
+        )}`
+      );
+    }
+    if (
+      !hasFocusedRequest ||
+      (asksVenue && bundleMatchesIntentScope(bundle, venueScope))
+    ) {
+      facts.push(
+        `**Venue:** ${formatConferenceVenue(conference) || "Not published"}`
+      );
+    }
+    if (!hasFocusedRequest) {
+      facts.push(`**Published sessions:** ${(bundle.sessions || []).length}`);
+      facts.push(`**Published media items:** ${(bundle.mediaItems || []).length}`);
+      facts.push(`**Published reports:** ${(bundle.reports || []).length}`);
+    }
+    if (asksSessions && bundleMatchesIntentScope(bundle, sessionScope)) {
+      facts.push(
+        `${asksSpeakers ? "**Published speakers**" : "**Programme sessions**"}\n${formatEditionSessions(
+          bundle,
+          requestedDays,
+          { speakersOnly: asksSpeakers }
+        )}`
+      );
+      sources.push(
+        ...(bundle.sessions || []).map((session) =>
+          sourceFor("session", session, session.title)
+        )
+      );
+    }
+    if (
+      (asksSponsors || asksPartners) &&
+      bundleMatchesIntentScope(bundle, sponsorScope)
+    ) {
+      facts.push(
+        `**${asksPartners && !asksSponsors ? "Partners" : "Sponsors and partners"}**\n${formatEditionSponsors(
+          bundle,
+          { partnersOnly: asksPartners && !asksSponsors }
+        )}`
+      );
+      sources.push(
+        ...(bundle.sponsors || []).map((sponsor) =>
+          sourceFor("sponsor", sponsor, sponsor.name)
+        )
+      );
+    }
+    if (asksMedia && bundleMatchesIntentScope(bundle, mediaScope)) {
+      facts.push(`**Published media**\n${formatEditionMedia(bundle)}`);
+      sources.push(
+        ...(bundle.mediaItems || []).map((item) =>
+          sourceFor("conference_media", item, item.title)
+        )
+      );
+    }
+    if (asksReports && bundleMatchesIntentScope(bundle, reportScope)) {
+      const reportItems = selectEditionReports(bundle, requestedReportTypes);
+      facts.push(
+        `**Published reports and documents**\n${formatEditionReports(
+          bundle,
+          requestedReportTypes
+        )}`
+      );
+      sources.push(
+        ...reportItems.map((item) =>
+          sourceFor("conference_report", item, item.title)
+        )
+      );
+    }
+    if (
+      conference.isActive === true &&
+      operationalMatches.length > 0 &&
+      bundleMatchesIntentScope(bundle, logisticsScope)
+    ) {
+      facts.push(
+        `**Published visitor information**\n${answerOperationalInfo(
+          operationalMatches
+        )}`
+      );
+      sources.push(
+        ...operationalMatches.map(({ item }) =>
+          sourceFor("operational_info", item, item.title)
+        )
+      );
+    }
+    if (
+      conference.isActive === true &&
+      unresolvedLogisticsTopics.length > 0 &&
+      bundleMatchesIntentScope(bundle, logisticsScope)
+    ) {
+      facts.push(answerUnpublishedLogistics(snapshot, unresolvedLogisticsTopics));
+    }
+    if (
+      conference.isActive !== true &&
+      unresolvedLogisticsTopics.length > 0 &&
+      bundleMatchesIntentScope(bundle, logisticsScope)
+    ) {
+      facts.push(
+        `I could not find archived public information about ${unresolvedLogisticsTopics.join(
+          ", "
+        )} for this edition.`
+      );
+    }
+
+    return `### ${conference.shortName || conference.title} (${year})\n\n${facts.join(
+      "\n\n"
+    )}`;
+  });
+
+  const introduction = selected.length > 1
+    ? "Here is the published information for the requested REC editions."
+    : "Here is the published information for that REC edition.";
+
+  return {
+    answer: joinMarkdownSections([introduction, ...sections]),
+    sources: uniqueSources(sources),
+  };
+}
+
 function isConferencePreparationQuestion(normalized) {
   return (
     /\b(prepare|preparation|get ready|plan|planning|maximize|maximise|make the most)\b/.test(
@@ -2016,6 +3107,100 @@ function isConferencePreparationQuestion(normalized) {
       normalized
     )
   );
+}
+
+const UNPUBLISHED_LOGISTICS_TOPICS = [
+  {
+    label: "Wi-Fi or internet access",
+    pattern: /\bwi[- ]?fi\b|\binternet (access|connection|available|availability)\b/,
+  },
+  { label: "parking", pattern: /\bparking\b/ },
+  {
+    label: "accommodation",
+    pattern: /\b(accommodation|lodging|hotel rooms?)\b/,
+  },
+  {
+    label: "transport or shuttle services",
+    pattern: /\b(shuttle|airport transfer|transport to|transport from)\b/,
+  },
+  { label: "the dress code", pattern: /\b(dress code|attire)\b/ },
+  { label: "visa support", pattern: /\bvisa(s| support| letter)?\b/ },
+  {
+    label: "accessibility arrangements",
+    pattern: /\b(accessibility|wheelchair|disability access|disabled access)\b/,
+  },
+  {
+    label: "attendance certificates",
+    pattern: /\b(certificate|certification)\b/,
+  },
+  {
+    label: "breakfast or dinner",
+    pattern: /\b(breakfast|dinner|evening meal)\b/,
+  },
+  { label: "childcare", pattern: /\b(childcare|child care|creche|crèche)\b/ },
+  {
+    label: "device charging facilities",
+    pattern: /\b(charging points?|power outlets?|device charging)\b/,
+  },
+  { label: "a prayer room", pattern: /\bprayer room\b/ },
+  {
+    label: "medical or first-aid support",
+    pattern: /\b(first aid|medical support|medical assistance)\b/,
+  },
+  {
+    label: "the venue security or bag policy",
+    pattern: /\b(bag policy|security checks?|security policy)\b/,
+  },
+];
+
+function getUnpublishedLogisticsTopics(normalized) {
+  return UNPUBLISHED_LOGISTICS_TOPICS
+    .filter((topic) => topic.pattern.test(normalized))
+    .map((topic) => topic.label);
+}
+
+function answerUnpublishedLogistics(snapshot, topics) {
+  const contacts = compact([
+    snapshot.conference.contactEmail,
+    snapshot.conference.contactPhone,
+    snapshot.conference.mainWebsiteUrl,
+  ]);
+  const subject = topics.length === 1
+    ? `**${topics[0]}**`
+    : topics.map((topic) => `**${topic}**`).join(", ");
+  const followUp = contacts.length > 0
+    ? `For confirmation, use the published conference contact details: ${contacts.join(", ")}.`
+    : "Please confirm this directly with the conference organizers.";
+
+  return joinMarkdownSections([
+    `I could not find published information about ${subject} in the conference materials.`,
+    followUp,
+  ]);
+}
+
+function isUnlistedOfficialAvailabilityQuestion(normalized) {
+  return (
+    /^(is|are|will|would|does|do|has|have|can)\b/.test(normalized) &&
+    /\b(available|availability|provided|offered|included|allowed|permitted|required|there be)\b/.test(
+      normalized
+    )
+  ) || /^what\b.*\b(available|provided|offered|included)\b/.test(normalized);
+}
+
+function answerUnlistedOfficialAvailability(snapshot) {
+  const contacts = compact([
+    snapshot.conference.contactEmail,
+    snapshot.conference.contactPhone,
+    snapshot.conference.mainWebsiteUrl,
+  ]);
+  const followUp = contacts.length > 0
+    ? `For confirmation, use the published conference contact details: ${contacts.join(", ")}.`
+    : "Please confirm this directly with the conference organizers.";
+
+  return joinMarkdownSections([
+    "I could not find that information in the published conference materials.",
+    followUp,
+  ]);
 }
 
 function summarizeDaySessions(snapshot, dayNumber, limit = 3) {
@@ -2169,12 +3354,15 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
   const requestedDayPart = getRequestedDayPart(normalized);
   const requestedHall = findRequestedHall(normalized, snapshot);
   const mentionedSession = findMentionedSession(normalized, snapshot.sessions);
-  const ceremonyBlock = findCeremonyBlock(snapshot, normalized);
+  const ceremonyBlocks = findCeremonyBlocks(snapshot, normalized);
+  const ceremonyBlock = ceremonyBlocks[0] || null;
   const topicRecommendationMatches = getTopicRecommendationMatches(
     snapshot,
     normalized
   );
   const wantsTopicRecommendation = isTopicRecommendationQuestion(normalized);
+  const wantsTopicSessionDetails =
+    wantsTopicRecommendation || isTopicSessionQuestion(normalized);
   const asksConferenceStart =
     /\bwhen\b.*\b(conference|rec|expo|event)\b.*\b(start|starts|starting|begin|begins|beginning)\b/.test(
       normalized
@@ -2185,6 +3373,14 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     /\bactually start\b/.test(normalized);
   const asksTechnologyAreas = isTechnologyAreasQuestion(normalized);
   const asksPreparation = isConferencePreparationQuestion(normalized);
+  const asksConferenceLocation = isExplicitConferenceLocationQuestion(normalized);
+  const operationalMatches = getOperationalInfoMatches(normalized, snapshot);
+  const publishedLogisticsLabels = getPublishedLogisticsLabels(
+    operationalMatches
+  );
+  const unpublishedLogisticsTopics = getUnpublishedLogisticsTopics(
+    normalized
+  ).filter((label) => !publishedLogisticsLabels.has(label));
   const oneDayOnly = /\b(only have one day|just one day|single day|one day)\b/.test(
     normalized
   );
@@ -2196,6 +3392,8 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
       /(overview|summary|more|about|tell|give|what)/.test(normalized));
   const wantsConferenceOverview = isConferenceOverviewQuestion(normalized);
   const wantsAllSessionsList = isAllSessionsListQuestion(normalized);
+  const wantsProgrammeProgression = isProgrammeProgressionQuestion(normalized);
+  const wantsProgrammeTradeOffs = isProgrammeTradeOffQuestion(normalized);
 
   function addPart(answer, partSources = []) {
     if (!answer) return;
@@ -2212,7 +3410,11 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     );
   }
 
-  if (wantsConferenceOverview && !wantsProgramOverview) {
+  if (
+    wantsConferenceOverview &&
+    !wantsProgramOverview &&
+    !isFocusedConferenceFactQuestion(normalized)
+  ) {
     addPart(
       isConferenceDeepDiveQuestion(normalized)
         ? answerConferenceDeepDive(snapshot)
@@ -2226,6 +3428,35 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
       answerConferencePreparation(snapshot),
       getConferencePreparationSources(snapshot)
     );
+  }
+
+  if (wantsProgrammeProgression) {
+    addPart(
+      answerProgrammeProgression(snapshot),
+      getConferencePreparationSources(snapshot)
+    );
+  }
+
+  if (wantsProgrammeTradeOffs) {
+    addPart(
+      answerProgrammeTradeOffs(snapshot),
+      getProgrammeTradeOffEvidence(snapshot).map((session) =>
+        sourceFor("session", session, session.title)
+      )
+    );
+  }
+
+  if (operationalMatches.length > 0) {
+    addPart(
+      answerOperationalInfo(operationalMatches),
+      operationalMatches.map(({ item }) =>
+        sourceFor("operational_info", item, item.title)
+      )
+    );
+  }
+
+  if (unpublishedLogisticsTopics.length > 0) {
+    addPart(answerUnpublishedLogistics(snapshot, unpublishedLogisticsTopics), sources);
   }
 
   if (wantsAllSessionsList || isGenericSessionsOverviewQuestion(normalized)) {
@@ -2285,7 +3516,8 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     !ceremonyBlock &&
     !requestedHall &&
     (!mentionedSession || /\b(conference|rec|expo|event)\b/.test(normalized)) &&
-    (/\b(date|dates|where|venue|location|take place|held)\b/.test(normalized) ||
+    (asksConferenceLocation ||
+      /\b(date|dates)\b/.test(normalized) ||
       (/\bwhen\b/.test(normalized) &&
         /\b(conference|rec|expo|event|it)\b/.test(normalized) &&
         !/\b(lunch|meal|tea|break|sessions?|forum)\b/.test(normalized)))
@@ -2295,6 +3527,7 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
 
   if (
     mentionedSession &&
+    !wantsTopicSessionDetails &&
     /\b(when|where|venue|time|schedule|details?|about|tell|sessions?|forum)\b/.test(
       normalized
     )
@@ -2304,9 +3537,9 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     ]);
   }
 
-  if (ceremonyBlock) {
-    addPart(answerCeremonyBlock(snapshot, ceremonyBlock), [
-      sourceFor("program_time_block", ceremonyBlock, ceremonyBlock.label),
+  for (const block of ceremonyBlocks) {
+    addPart(answerCeremonyBlock(snapshot, block), [
+      sourceFor("program_time_block", block, block.label),
     ]);
   }
 
@@ -2447,12 +3680,13 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     );
   }
 
-  if (wantsTopicRecommendation) {
+  if (wantsTopicSessionDetails) {
     for (const topicMatch of topicRecommendationMatches) {
       addPart(
-        answerTopicRecommendation(topicMatch),
+        answerTopicRecommendation(topicMatch, {
+          recommendation: wantsTopicRecommendation,
+        }),
         topicMatch.sessions
-          .slice(0, 6)
           .map((session) => sourceFor("session", session, session.title))
       );
     }
@@ -2489,7 +3723,7 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     );
   }
 
-  if (/(exhibition|exhibit|expo block|expo area)/.test(normalized)) {
+  if (isExhibitionScheduleQuestion(normalized)) {
     const exhibitionBlocks = snapshot.timeBlocks.filter(
       (block) => block.type === "EXHIBITION"
     );
@@ -2573,7 +3807,7 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     );
   }
 
-  if (!wantsTopicRecommendation && isFilteredSessionQuestion(normalized)) {
+  if (!wantsTopicSessionDetails && isFilteredSessionQuestion(normalized)) {
     const topicSessions = findSessionsByTopicQuestion(snapshot, normalized);
     addPart(
       answerSessionsByTopic(topicSessions),
@@ -2631,20 +3865,73 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
   };
 }
 
-export async function getDirectRecAnswer(question, { signal } = {}) {
+export async function getDirectRecAnswer(
+  question,
+  { signal, snapshot: providedSnapshot } = {}
+) {
   const normalized = normalizeQuestion(question);
+  const unpublishedLogisticsTopics = getUnpublishedLogisticsTopics(normalized);
+  const wantsProgrammeTradeOffs = isProgrammeTradeOffQuestion(normalized);
+  const wantsHistoricalThemeEvolution =
+    isHistoricalThemeEvolutionQuestion(normalized);
+  const hasPotentialHistoricalScope =
+    /\b(previous|past|historical|history|archive|archived|earlier|former|prior)\b/.test(
+      normalized
+    ) ||
+    /\b20\d{2}\b/.test(normalized) ||
+    /\brec\s*[-']?\s*\d{2}\b/.test(normalized);
+  const hasPotentialMediaRequest = isConferenceMediaQuestion(normalized);
+  const hasPotentialReportRequest = isConferenceReportQuestion(normalized);
 
   if (
-    !/(conference|rec|expo|venue|location|register|registration|date|when|where|theme|focus|sponsor|partner|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|speaker|speakers|presenter|presenters|panelist|panelists|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|exhibition|exhibit|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer|renewable|energy|beginner|new|implementation|sustainability|technology|technologies|technical|ceremony|opening|closing|start|starts|starting|begin|begins|prepare|preparation|planning|maximize|maximise|cooking|cookstove|solco|biofuel|geothermal|nuclear|productive use|efficiency)/.test(
-      normalized
-    )
+    unpublishedLogisticsTopics.length === 0 &&
+    !wantsProgrammeTradeOffs &&
+    !hasPotentialHistoricalScope &&
+    !hasPotentialMediaRequest &&
+    !hasPotentialReportRequest &&
+    !/(conference|rec|expo|venue|location|visitor|guest|help desk|lost and found|register|registration|date|when|where|theme|focus|sponsor|partner|contact|website|fee|cost|price|capacity|limit|days?|program|programme|agenda|schedule|session|speaker|speakers|presenter|presenters|panelist|panelists|business forum|giz|fcdo|european union|serena|hall|room|lunch|meal|tea|break|exhibition|exhibit|finance|financial|investment|investor|capital|bank|funding|policy|policymaker|government|developer|renewable|energy|beginner|new|implementation|sustainability|technology|technologies|technical|ceremony|opening|closing|start|starts|starting|begin|begins|prepare|preparation|planning|maximize|maximise|cooking|cookstove|solco|biofuel|geothermal|nuclear|productive use|efficiency|wifi|internet|parking|transport|shuttle|accessibility|wheelchair|dress code|attire|breakfast|dinner|charging|prayer|first aid|medical|security|bag policy)/.test(normalized)
   ) {
     return null;
   }
 
-  const snapshot = await getRecPublicSnapshot({ signal });
+  if (
+    isOpenEndedSynthesisQuestion(normalized) &&
+    !isProgrammeProgressionQuestion(normalized) &&
+    !wantsProgrammeTradeOffs &&
+    !wantsHistoricalThemeEvolution &&
+    !hasPotentialHistoricalScope &&
+    !hasPotentialMediaRequest &&
+    !hasPotentialReportRequest
+  ) {
+    return null;
+  }
+
+  const snapshot = providedSnapshot
+    ? snapshotToRuntimeData(providedSnapshot)
+    : await getRecPublicSnapshot({ signal });
   const conference = snapshot.conference;
   const sources = [sourceFor("conference_overview", conference, conference.title)];
+  const hasHistoricalScope = hasHistoricalConferenceScope(normalized, snapshot);
+
+  if (wantsHistoricalThemeEvolution) {
+    return answerHistoricalThemeEvolution(normalized, snapshot);
+  }
+
+  if (
+    hasHistoricalScope ||
+    hasPotentialMediaRequest ||
+    hasPotentialReportRequest
+  ) {
+    return answerConferenceEditions(normalized, snapshot);
+  }
+
+  const operationalMatches = getOperationalInfoMatches(normalized, snapshot);
+  const publishedLogisticsLabels = getPublishedLogisticsLabels(
+    operationalMatches
+  );
+  const unresolvedLogisticsTopics = unpublishedLogisticsTopics.filter(
+    (label) => !publishedLogisticsLabels.has(label)
+  );
   const mentionedSponsor = findMentionedSponsor(normalized, snapshot.sponsors);
   const requestedDays = extractRequestedDays(normalized);
   const requestedDay = requestedDays[0] || null;
@@ -2654,9 +3941,54 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
   const dayThemeMatch = getDayThemeMatch(normalized, snapshot);
   const compoundAnswer = getCompoundDirectAnswer(normalized, snapshot, sources);
   const wantsAllSessionsList = isAllSessionsListQuestion(normalized);
+  const topicRecommendationMatches = getTopicRecommendationMatches(
+    snapshot,
+    normalized
+  );
+  const wantsTopicRecommendation = isTopicRecommendationQuestion(normalized);
+  const wantsTopicSessionDetails =
+    wantsTopicRecommendation || isTopicSessionQuestion(normalized);
 
   if (compoundAnswer) {
     return compoundAnswer;
+  }
+
+  if (operationalMatches.length > 0) {
+    return {
+      answer: answerOperationalInfo(operationalMatches),
+      sources: operationalMatches.map(({ item }) =>
+        sourceFor("operational_info", item, item.title)
+      ),
+    };
+  }
+
+  if (unresolvedLogisticsTopics.length > 0) {
+    return {
+      answer: answerUnpublishedLogistics(snapshot, unresolvedLogisticsTopics),
+      sources,
+    };
+  }
+
+  if (wantsProgrammeTradeOffs) {
+    return {
+      answer: answerProgrammeTradeOffs(snapshot),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...getProgrammeTradeOffEvidence(snapshot).map((session) =>
+          sourceFor("session", session, session.title)
+        ),
+      ],
+    };
+  }
+
+  if (isProgrammeProgressionQuestion(normalized)) {
+    return {
+      answer: answerProgrammeProgression(snapshot),
+      sources: [
+        sourceFor("conference_overview", conference, conference.title),
+        ...getConferencePreparationSources(snapshot),
+      ],
+    };
   }
 
   if (isConferencePreparationQuestion(normalized)) {
@@ -2706,14 +4038,19 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     };
   }
 
-  const ceremonyBlock = findCeremonyBlock(snapshot, normalized);
+  const ceremonyBlocks = findCeremonyBlocks(snapshot, normalized);
+  const ceremonyBlock = ceremonyBlocks[0] || null;
 
   if (ceremonyBlock) {
     return {
-      answer: answerCeremonyBlock(snapshot, ceremonyBlock),
+      answer: joinMarkdownSections(
+        ceremonyBlocks.map((block) => answerCeremonyBlock(snapshot, block))
+      ),
       sources: [
         sourceFor("conference_overview", conference, conference.title),
-        sourceFor("program_time_block", ceremonyBlock, ceremonyBlock.label),
+        ...ceremonyBlocks.map((block) =>
+          sourceFor("program_time_block", block, block.label)
+        ),
       ],
     };
   }
@@ -2766,7 +4103,7 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     };
   }
 
-  if (mentionedSession) {
+  if (mentionedSession && !wantsTopicSessionDetails) {
     return {
       answer: answerSpecificSession(mentionedSession, normalized),
       sources: [
@@ -2979,24 +4316,22 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     };
   }
 
-  const topicRecommendationMatches = getTopicRecommendationMatches(
-    snapshot,
-    normalized
-  );
-
   if (
     topicRecommendationMatches.length > 0 &&
-    isTopicRecommendationQuestion(normalized)
+    wantsTopicSessionDetails
   ) {
     return {
       answer: topicRecommendationMatches
-        .map((match) => answerTopicRecommendation(match))
-        .join(" "),
+        .map((match) =>
+          answerTopicRecommendation(match, {
+            recommendation: wantsTopicRecommendation,
+          })
+        )
+        .join("\n\n"),
       sources: [
         sourceFor("conference_overview", conference, conference.title),
         ...topicRecommendationMatches.flatMap((match) =>
           match.sessions
-            .slice(0, 6)
             .map((session) => sourceFor("session", session, session.title))
         ),
       ],
@@ -3030,7 +4365,7 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     };
   }
 
-  if (/(exhibition|exhibit|expo block|expo area)/.test(normalized)) {
+  if (isExhibitionScheduleQuestion(normalized)) {
     const exhibitionBlocks = snapshot.timeBlocks.filter(
       (block) => block.type === "EXHIBITION"
     );
@@ -3221,7 +4556,7 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
     }
 
     return {
-      answer: `${conference.title} will take place at ${conference.venue}, ${conference.location}.`,
+      answer: `${conference.title} will take place at ${formatConferenceVenue(conference)}.`,
       sources,
     };
   }
@@ -3321,6 +4656,13 @@ export async function getDirectRecAnswer(question, { signal } = {}) {
         ...sources,
         ...partners.map((partner) => sourceFor("sponsor", partner, partner.name)),
       ],
+    };
+  }
+
+  if (isUnlistedOfficialAvailabilityQuestion(normalized)) {
+    return {
+      answer: answerUnlistedOfficialAvailability(snapshot),
+      sources,
     };
   }
 

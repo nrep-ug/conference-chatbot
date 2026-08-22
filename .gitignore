@@ -50,6 +50,8 @@ data/generated/*
 
 # runtime admin auth store
 data/admin/admin-users.json
+data/admin/conference-knowledge.json
+data/admin/*.tmp
 
 # logs
 logs/

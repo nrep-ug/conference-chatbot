@@ -4,12 +4,12 @@ import { logChatEvent } from "@/lib/chat-diagnostics";
 import { getEmbedding, askMistral, streamMistral } from "@/lib/ollama";
 import { qdrant, QDRANT_COLLECTION } from "@/lib/qdrant";
 import {
-  buildRecDocuments,
   getDirectRecAnswer,
   getRecPublicSnapshot,
 } from "@/lib/rec-data";
 import { retrievePlannedRecContext } from "@/lib/rec-planner";
 import { getPlannerSchemaMarkdown } from "@/lib/rec-schema";
+import { renderRecSnapshotMarkdown } from "@/lib/rec-snapshot";
 
 export const runtime = "nodejs";
 
@@ -18,6 +18,7 @@ const MAX_CONTEXT_CHARS = readInteger("RAG_MAX_CONTEXT_CHARS", 1600);
 const MIN_SEARCH_SCORE = readFloat("RAG_MIN_SEARCH_SCORE", 0.52);
 const ANSWER_CACHE_TTL_MS = readInteger("ANSWER_CACHE_TTL_MS", 5 * 60 * 1000);
 const ANSWER_CACHE_MAX = readInteger("ANSWER_CACHE_MAX", 100);
+const MAX_QUESTION_CHARS = readInteger("CHAT_MAX_QUESTION_CHARS", 4000);
 const QDRANT_COMPLEMENT_ENABLED = readBoolean("QDRANT_COMPLEMENT_ENABLED", false);
 const QDRANT_COMPLEMENT_MODE = (process.env.QDRANT_COMPLEMENT_MODE || "append")
   .trim()
@@ -65,7 +66,7 @@ const REC_FULL_CONTEXT_MAX_CHARS = readInteger(
 );
 const REC_FULL_CONTEXT_SCHEMA_MAX_CHARS = readInteger(
   "REC_FULL_CONTEXT_SCHEMA_MAX_CHARS",
-  6000
+  2500
 );
 const answerCache = new Map();
 const CHATBOT_HELP_ANSWER = [
@@ -75,14 +76,15 @@ const CHATBOT_HELP_ANSWER = [
   "- Dates, venue, halls, and logistics",
   "- Registration status, contacts, and website links",
   "- Programme sessions, themes, ceremonies, tea breaks, and lunch",
-  "- Sponsors, partners, and practical preparation guidance",
+  "- Sponsors, partners, venue guidance, and practical preparation",
+  "- Published programmes, media, and reports from previous REC editions",
   "",
   "I will say when official information is not listed in the conference materials.",
 ].join("\n");
 const OUT_OF_SCOPE_ANSWER =
-  "I’m here to help with the Renewable Energy Conference & Expo. Ask me about the venue, dates, registration, programme sessions, themes, halls, sponsors, contacts, or website links.";
+  "I’m here to help with the Renewable Energy Conference & Expo. Ask me about the venue, visitor guidance, dates, registration, programme sessions, themes, halls, sponsors, previous editions, media, reports, contacts, or website links.";
 const CONFERENCE_TERMS =
-  /\b(conference|rec|expo|serena|venue|location|register|registration|programme|program|agenda|schedule|session|day|theme|speaker|sponsor|exhibitor|hall|room|contact|website|fee|cost|price|capacity|limit|lunch|meal|tea|break|business forum|giz|fcdo|european union|technology|technologies|technical|ceremony|opening|closing|start|starts|starting|prepare|preparation|planning|maximize|maximise|clean cooking|cooking technolog(?:y|ies)|solar[- ]electric cooking|solco|biofuel|biofuels|geothermal|nuclear|productive use|energy efficiency)\b/;
+  /\b(conference|rec|expo|serena|venue|location|visitor|guest|register|registration|programme|program|agenda|schedule|session|day|theme|speaker|sponsor|exhibitor|hall|room|contact|website|fee|cost|price|capacity|limit|lunch|meal|tea|break|business forum|giz|fcdo|european union|technology|technologies|technical|ceremony|opening|closing|start|starts|starting|prepare|preparation|planning|maximize|maximise|clean cooking|cooking technolog(?:y|ies)|solar[- ]electric cooking|solco|biofuel|biofuels|geothermal|nuclear|productive use|energy efficiency|previous|past|historical|history|archive|photo|photos|album|gallery|media|video|recording|report|reports|proceedings|communique|outcomes|wifi|internet|parking|shuttle|accessibility|wheelchair|attire|dress code|first aid|bag policy|2022|2023|2024|2025|2026)\b/;
 const OFF_TOPIC_TERMS =
   /\b(joke|jazz|entertain|sing|song|poem|story|weather|news|sports|football|recipe|code|python|javascript|homework|essay|translate|summarize this|crypto|stock|president|politics|hotel|hotels)\b/;
 const GENERAL_KNOWLEDGE_START =
@@ -287,45 +289,14 @@ function shouldUseFullRecContext(question) {
   return true;
 }
 
-function formatRecDocument(document) {
-  const payload = document.payload || {};
-
-  return [
-    `Source type: ${payload.sourceType || "unknown"}`,
-    `Source: ${payload.source || payload.title || document.id}`,
-    payload.tableId ? `Table ID: ${payload.tableId}` : null,
-    payload.rowId ? `Row ID: ${payload.rowId}` : null,
-    document.text,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function formatFullRecContext(documents, maxContextChars) {
-  let remaining = maxContextChars;
-  const chunks = [];
-
-  for (const document of documents) {
-    if (remaining <= 0) break;
-
-    const chunk = formatRecDocument(document).trim();
-    if (!chunk) continue;
-
-    chunks.push(chunk.slice(0, remaining));
-    remaining -= chunk.length;
-  }
-
-  return chunks.join("\n\n---\n\n");
-}
-
-function sourcesFromRecDocuments(documents) {
-  return documents.map((document) => ({
-    source: document.payload?.source,
-    sourceType: document.payload?.sourceType,
-    tableId: document.payload?.tableId,
-    rowId: document.payload?.rowId,
+function sourceFromRecSnapshot(snapshot) {
+  return {
+    source: `${snapshot.conference.title} public data snapshot`,
+    sourceType: "conference_snapshot",
+    tableId: snapshot.conference.$tableId,
+    rowId: snapshot.conference.$id,
     score: 1,
-  }));
+  };
 }
 
 async function retrieveFullRecContext(question, signal, requestId) {
@@ -337,13 +308,12 @@ async function retrieveFullRecContext(question, signal, requestId) {
 
   try {
     const snapshot = await getRecPublicSnapshot({ signal });
-    const documents = buildRecDocuments(snapshot);
     const schema = getPlannerSchemaMarkdown().slice(
       0,
       REC_FULL_CONTEXT_SCHEMA_MAX_CHARS
     );
-    const dataContext = formatFullRecContext(
-      documents,
+    const dataContext = renderRecSnapshotMarkdown(snapshot, { question }).slice(
+      0,
       REC_FULL_CONTEXT_MAX_CHARS
     );
 
@@ -357,19 +327,19 @@ async function retrieveFullRecContext(question, signal, requestId) {
     }
 
     const context = [
-      "PUBLIC REC26 DATABASE SCHEMA:",
+      "PUBLIC REC CONFERENCE DATABASE SCHEMA:",
       schema,
       "",
-      "COMPLETE PUBLIC ACTIVE-CONFERENCE DATA SNAPSHOT:",
+      "PUBLIC ACTIVE AND HISTORICAL CONFERENCE DATA SNAPSHOT:",
       dataContext,
       "",
-      "Use the schema to understand table relationships and the data snapshot as the source of official facts. The snapshot contains only public data for the active conference.",
+      "Use the schema to understand table relationships. Default to the active conference unless the question explicitly selects a previous year or REC edition. Admin operational facts, historical media, and published conference reports in this snapshot are public.",
     ].join("\n");
 
     logChatEvent("full_rec_context_loaded", {
       requestId,
       durationMs: Date.now() - startedAt,
-      sourceCount: documents.length,
+      sourceCount: 1,
       contextChars: context.length,
       mode: REC_FULL_CONTEXT_MODE,
     });
@@ -377,7 +347,7 @@ async function retrieveFullRecContext(question, signal, requestId) {
     return {
       confident: true,
       context,
-      sources: sourcesFromRecDocuments(documents),
+      sources: [sourceFromRecSnapshot(snapshot)],
     };
   } catch (error) {
     logChatEvent("full_rec_context_error", {
@@ -438,7 +408,7 @@ async function retrieveFullQdrantContext(question, requestId) {
   }
 
   const context = [
-    "COMPLETE INDEXED PUBLIC REC26 CONTEXT:",
+    "COMPLETE INDEXED PUBLIC REC CONFERENCE CONTEXT:",
     formatContext(sortedResults, QDRANT_FULL_CONTEXT_MAX_CHARS),
   ].join("\n");
   const sources = formatSources(sortedResults);
@@ -794,8 +764,19 @@ function writeEvent(controller, encoder, event, data) {
   );
 }
 
+function isRequestTimeout(error) {
+  return (
+    error?.name === "AbortError" ||
+    /\b(aborted|timed? out|timeout)\b/i.test(error?.message || "")
+  );
+}
+
 function getClientErrorMessage(error) {
   const message = error?.message || "";
+
+  if (isRequestTimeout(error)) {
+    return "The answer model took too long to respond. Please try the question again or ask for a narrower part of the conference programme.";
+  }
 
   if (/\b(Chat|Planner|Embedding) failed\b/i.test(message)) {
     return "The conference data lookup is available, but the local AI model service is not ready. Please check that Ollama is running and that the configured chat/planner/embed models are installed on the server.";
@@ -1041,9 +1022,11 @@ export async function POST(request) {
   const startedAt = Date.now();
 
   try {
-    const { question, stream } = await request.json();
+    const body = await request.json().catch(() => null);
+    const question = body?.question;
+    const stream = body?.stream === true;
 
-    if (!question || question.trim().length < 2) {
+    if (typeof question !== "string" || question.trim().length < 2) {
       return Response.json(
         { error: "Please provide a valid question." },
         { status: 400 }
@@ -1051,9 +1034,19 @@ export async function POST(request) {
     }
 
     const normalizedQuestion = question.trim();
+
+    if (normalizedQuestion.length > MAX_QUESTION_CHARS) {
+      return Response.json(
+        {
+          error: `Please keep the question under ${MAX_QUESTION_CHARS} characters.`,
+        },
+        { status: 400 }
+      );
+    }
+
     logChatEvent("request_start", {
       requestId,
-      stream: Boolean(stream),
+      stream,
       question: summarizeQuestion(normalizedQuestion),
     });
 
@@ -1084,7 +1077,7 @@ export async function POST(request) {
 
     return Response.json(
       { error: getClientErrorMessage(error) },
-      { status: 500 }
+      { status: isRequestTimeout(error) ? 504 : 500 }
     );
   }
 }

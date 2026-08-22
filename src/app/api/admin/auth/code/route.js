@@ -16,7 +16,9 @@ export async function POST(request) {
 
   try {
     const loginCode = await createAdminLoginCode(body.email);
-    await sendAdminLoginCode(loginCode);
+    if (!loginCode.reused) {
+      await sendAdminLoginCode(loginCode);
+    }
 
     return Response.json({
       ok: true,
@@ -27,13 +29,20 @@ export async function POST(request) {
   } catch (error) {
     const isAllowedEmailError = /not allowed/i.test(error.message || "");
 
+    if (isAllowedEmailError) {
+      return Response.json({
+        ok: true,
+        email: String(body.email || "").trim().toLowerCase(),
+        mode: "login",
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      });
+    }
+
     return Response.json(
       {
-        error: isAllowedEmailError
-          ? error.message
-          : "Failed to send verification code. Check SMTP settings on the server.",
+        error: "Failed to send verification code. Check SMTP settings on the server.",
       },
-      { status: isAllowedEmailError ? 403 : 500 }
+      { status: 500 }
     );
   }
 }

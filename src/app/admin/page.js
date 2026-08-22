@@ -11,8 +11,20 @@ const EMAIL_STATE = {
 const quickChecks = [
   "Ask a finance recommendation question",
   "Ask about preparation across four days",
-  "Ask for the Day 3 schedule",
-  "Ask for sponsors and partners",
+  "Ask for the REC25 programme",
+  "Ask for photos from REC24",
+  "Ask a published venue logistics question",
+];
+
+const knowledgeCategories = [
+  ["venue", "Venue"],
+  ["connectivity", "Connectivity"],
+  ["transport", "Transport"],
+  ["accessibility", "Accessibility"],
+  ["catering", "Catering"],
+  ["registration", "Registration"],
+  ["safety", "Safety"],
+  ["other", "Other"],
 ];
 
 function getQdrantStatusLabel(vectorStore) {
@@ -29,6 +41,23 @@ function classNames(...values) {
 async function postJson(url, body) {
   const response = await fetch(url, {
     method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(data.error || "The request failed.");
+  }
+
+  return data;
+}
+
+async function putJson(url, body) {
+  const response = await fetch(url, {
+    method: "PUT",
     headers: {
       "Content-Type": "application/json",
     },
@@ -141,6 +170,33 @@ function Icon({ name, className = "" }) {
         <path d="M9 7h6" />
       </>
     ),
+    plus: (
+      <>
+        <path d="M12 5v14" />
+        <path d="M5 12h14" />
+      </>
+    ),
+    save: (
+      <>
+        <path d="M5 4h12l2 2v14H5Z" />
+        <path d="M8 4v6h8V4" />
+        <path d="M8 20v-6h8v6" />
+      </>
+    ),
+    trash: (
+      <>
+        <path d="M4 7h16" />
+        <path d="M9 7V4h6v3" />
+        <path d="m7 7 1 13h8l1-13" />
+      </>
+    ),
+    wifi: (
+      <>
+        <path d="M5 12.5a10 10 0 0 1 14 0" />
+        <path d="M8.5 16a5 5 0 0 1 7 0" />
+        <path d="M12 20h.01" />
+      </>
+    ),
   };
 
   return <svg {...common}>{paths[name]}</svg>;
@@ -183,6 +239,286 @@ function MetricCard({ icon, label, value, detail }) {
       </div>
       {detail && <p className="mt-4 text-sm leading-6 text-slate-500">{detail}</p>}
     </article>
+  );
+}
+
+function createKnowledgeItem() {
+  return {
+    clientId: crypto.randomUUID(),
+    id: "",
+    category: "venue",
+    title: "",
+    answer: "",
+    keywordsText: "",
+    isPublished: false,
+  };
+}
+
+function KnowledgeEditor({ onStatusRefresh }) {
+  const [conference, setConference] = useState(null);
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busyAction, setBusyAction] = useState("");
+  const [notice, setNotice] = useState("");
+  const [hasError, setHasError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadKnowledge() {
+      try {
+        const response = await fetch("/api/admin/knowledge", {
+          cache: "no-store",
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Unable to load venue knowledge.");
+        if (cancelled) return;
+
+        setConference(data.conference);
+        setItems(
+          (data.items || []).map((item) => ({
+            ...item,
+            clientId: item.id || crypto.randomUUID(),
+            keywordsText: (item.keywords || []).join(", "),
+          }))
+        );
+      } catch (error) {
+        if (!cancelled) {
+          setNotice(error.message);
+          setHasError(true);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    loadKnowledge();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function updateItem(clientId, field, value) {
+    setItems((current) =>
+      current.map((item) =>
+        item.clientId === clientId ? { ...item, [field]: value } : item
+      )
+    );
+  }
+
+  function removeItem(clientId) {
+    setItems((current) => current.filter((item) => item.clientId !== clientId));
+  }
+
+  async function saveKnowledge(rebuildQdrant) {
+    setBusyAction(rebuildQdrant ? "qdrant" : "save");
+    setNotice("");
+    setHasError(false);
+
+    try {
+      const result = await putJson("/api/admin/knowledge", {
+        rebuildQdrant,
+        items: items.map((item) => ({
+          id: item.id,
+          category: item.category,
+          title: item.title,
+          answer: item.answer,
+          keywords: item.keywordsText
+            .split(",")
+            .map((keyword) => keyword.trim())
+            .filter(Boolean),
+          isPublished: item.isPublished,
+        })),
+      });
+
+      setItems(
+        result.items.map((item) => ({
+          ...item,
+          clientId: item.id,
+          keywordsText: (item.keywords || []).join(", "),
+        }))
+      );
+      setNotice(
+        rebuildQdrant
+          ? `Saved ${result.items.length} entries and rebuilt Qdrant with ${result.qdrant?.points || 0} points.`
+          : `Saved ${result.items.length} entries; ${result.publishedCount} are public.`
+      );
+      await onStatusRefresh();
+    } catch (error) {
+      setNotice(error.message);
+      setHasError(true);
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  return (
+    <section
+      id="venue-knowledge"
+      className="mt-6 rounded-lg border border-slate-200 bg-white shadow-sm"
+    >
+      <div className="flex flex-col gap-4 border-b border-slate-200 p-5 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <Icon name="wifi" className="h-5 w-5 text-emerald-600" />
+            <h2 className="text-lg font-semibold">Venue and visitor knowledge</h2>
+          </div>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
+            {conference
+              ? `${conference.shortName || conference.title} (${conference.year})`
+              : "Active conference"}
+          </p>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-amber-700">
+            Published entries become public chatbot answers. Add only guest Wi-Fi
+            details and public visitor guidance; never store staff networks,
+            internal systems, or private credentials here.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setItems((current) => [...current, createKnowledgeItem()])}
+          disabled={loading || Boolean(busyAction)}
+          className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+        >
+          <Icon name="plus" className="h-4 w-4" />
+          Add entry
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="p-5 text-sm text-slate-500">Loading published knowledge...</div>
+      ) : (
+        <div className="divide-y divide-slate-200">
+          {items.length === 0 && (
+            <div className="p-5 text-sm text-slate-500">
+              No venue or visitor entries have been added.
+            </div>
+          )}
+          {items.map((item, index) => (
+            <div key={item.clientId} className="p-5">
+              <div className="grid gap-4 lg:grid-cols-[180px_1fr_auto] lg:items-start">
+                <label className="block">
+                  <span className="text-xs font-semibold uppercase text-slate-500">
+                    Category
+                  </span>
+                  <select
+                    value={item.category}
+                    onChange={(event) =>
+                      updateItem(item.clientId, "category", event.target.value)
+                    }
+                    className="mt-2 w-full rounded-md border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                  >
+                    {knowledgeCategories.map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-xs font-semibold uppercase text-slate-500">
+                    Public topic
+                  </span>
+                  <input
+                    value={item.title}
+                    onChange={(event) =>
+                      updateItem(item.clientId, "title", event.target.value)
+                    }
+                    maxLength={140}
+                    placeholder="Guest Wi-Fi access"
+                    className="mt-2 w-full rounded-md border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => removeItem(item.clientId)}
+                  title={`Delete entry ${index + 1}`}
+                  aria-label={`Delete entry ${index + 1}`}
+                  className="mt-6 flex h-10 w-10 items-center justify-center rounded-md border border-red-200 text-red-700 transition hover:bg-red-50"
+                >
+                  <Icon name="trash" className="h-4 w-4" />
+                </button>
+              </div>
+              <label className="mt-4 block">
+                <span className="text-xs font-semibold uppercase text-slate-500">
+                  Public answer
+                </span>
+                <textarea
+                  value={item.answer}
+                  onChange={(event) =>
+                    updateItem(item.clientId, "answer", event.target.value)
+                  }
+                  maxLength={3000}
+                  rows={3}
+                  placeholder="Connect to the public guest network..."
+                  className="mt-2 w-full resize-y rounded-md border border-slate-300 px-3 py-2.5 text-sm leading-6 outline-none focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                />
+              </label>
+              <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
+                <label className="block">
+                  <span className="text-xs font-semibold uppercase text-slate-500">
+                    Matching keywords
+                  </span>
+                  <input
+                    value={item.keywordsText}
+                    onChange={(event) =>
+                      updateItem(item.clientId, "keywordsText", event.target.value)
+                    }
+                    placeholder="wifi, internet, password, connectivity"
+                    className="mt-2 w-full rounded-md border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                  />
+                </label>
+                <label className="flex h-11 items-center gap-3 rounded-md border border-slate-300 px-4 text-sm font-semibold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={item.isPublished}
+                    onChange={(event) =>
+                      updateItem(item.clientId, "isPublished", event.target.checked)
+                    }
+                    className="h-4 w-4 accent-emerald-600"
+                  />
+                  Published
+                </label>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-col gap-3 border-t border-slate-200 bg-slate-50 p-5 sm:flex-row sm:items-center sm:justify-between">
+        <div
+          className={classNames(
+            "text-sm",
+            hasError ? "text-red-700" : "text-slate-600"
+          )}
+        >
+          {notice || `${items.filter((item) => item.isPublished).length} public entr${
+            items.filter((item) => item.isPublished).length === 1 ? "y" : "ies"
+          }`}
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <button
+            type="button"
+            onClick={() => saveKnowledge(false)}
+            disabled={loading || Boolean(busyAction)}
+            className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+          >
+            <Icon name="save" className="h-4 w-4" />
+            {busyAction === "save" ? "Saving..." : "Save changes"}
+          </button>
+          <button
+            type="button"
+            onClick={() => saveKnowledge(true)}
+            disabled={loading || Boolean(busyAction)}
+            className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+          >
+            <Icon name="vector" className="h-4 w-4" />
+            {busyAction === "qdrant" ? "Rebuilding..." : "Save + rebuild Qdrant"}
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -441,6 +777,7 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
             {[
               ["activity", "Overview"],
               ["database", "Data refresh"],
+              ["wifi", "Venue knowledge"],
               ["vector", "Vector index"],
               ["shield", "Access"],
             ].map(([icon, label], index) => (
@@ -507,9 +844,9 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
             />
             <MetricCard
               icon="user"
-              label="Allowed admins"
-              value={auth?.allowedUsers ?? "-"}
-              detail={`${auth?.configuredUsers ?? 0} configured account(s)`}
+              label="Previous editions"
+              value={snapshot?.counts?.previousConferences ?? "-"}
+              detail={`${snapshot?.counts?.historicalMediaItems ?? 0} media, ${snapshot?.counts?.historicalReports ?? 0} reports`}
             />
           </div>
 
@@ -522,9 +859,9 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
                 <div>
                   <h2 className="text-lg font-semibold">Data controls</h2>
                   <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">
-                    Pull the active conference from Appwrite, regenerate the
-                    local snapshot files, and optionally rebuild Qdrant for
-                    semantic context.
+                    Pull all public REC editions from Appwrite, regenerate the
+                    active and historical snapshot, and optionally rebuild
+                    Qdrant for semantic context.
                   </p>
                 </div>
                 <div className="flex flex-col gap-2 sm:min-w-56">
@@ -559,6 +896,13 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
                   ["Time blocks", snapshot?.counts?.timeBlocks],
                   ["Sponsor categories", snapshot?.counts?.sponsorCategories],
                   ["Sponsors", snapshot?.counts?.sponsors],
+                  ["Venue knowledge", snapshot?.counts?.operationalInfo],
+                  ["Historical media", snapshot?.counts?.historicalMediaItems],
+                  [
+                    "Conference reports",
+                    (snapshot?.counts?.reports ?? 0) +
+                      (snapshot?.counts?.historicalReports ?? 0),
+                  ],
                 ].map(([label, value]) => (
                   <div
                     key={label}
@@ -623,6 +967,8 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
               </div>
             </section>
           </div>
+
+          <KnowledgeEditor onStatusRefresh={refreshStatus} />
 
           <div className="mt-6 grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
             <section

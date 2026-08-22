@@ -1,6 +1,7 @@
 import { logChatEvent } from "@/lib/chat-diagnostics";
 import { requireAdmin } from "@/lib/admin-auth";
 import { ingestRecSnapshotToQdrant } from "@/lib/rec-qdrant-ingest";
+import { invalidateRecPublicSnapshotCache } from "@/lib/rec-data";
 import { refreshGeneratedRecSnapshot } from "@/lib/rec-snapshot";
 
 export const runtime = "nodejs";
@@ -26,6 +27,8 @@ export async function POST(request) {
       signal: request.signal,
     });
     let qdrant = null;
+
+    invalidateRecPublicSnapshotCache();
 
     if (body?.rebuildQdrant === true) {
       qdrant = await ingestRecSnapshotToQdrant(refresh.snapshot);

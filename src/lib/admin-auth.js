@@ -23,6 +23,10 @@ const SESSION_TTL_MS = readInteger(
   7 * 24 * 60 * 60 * 1000
 );
 const CODE_TTL_MS = readInteger("ADMIN_LOGIN_CODE_TTL_MS", 10 * 60 * 1000);
+const CODE_COOLDOWN_MS = readInteger(
+  "ADMIN_LOGIN_CODE_COOLDOWN_MS",
+  60 * 1000
+);
 const PASSWORD_KEY_LENGTH = 64;
 const PASSWORD_PARAMS = {
   name: "scrypt",
@@ -221,6 +225,23 @@ export async function createAdminLoginCode(email) {
     throw new Error("This email is not allowed to access the admin console.");
   }
 
+  const existingCode = store.loginCodes.find(
+    (item) => item.email === normalizedEmail
+  );
+  const existingCodeAge = existingCode
+    ? Date.now() - new Date(existingCode.createdAt).getTime()
+    : Number.POSITIVE_INFINITY;
+
+  if (existingCode && existingCodeAge < CODE_COOLDOWN_MS) {
+    return {
+      code: "",
+      email: normalizedEmail,
+      mode: isUserConfigured(user) ? "login" : "setup",
+      expiresAt: existingCode.expiresAt,
+      reused: true,
+    };
+  }
+
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const createdAt = nowIso();
   const expiresAt = new Date(Date.now() + CODE_TTL_MS).toISOString();
@@ -242,6 +263,7 @@ export async function createAdminLoginCode(email) {
     email: normalizedEmail,
     mode: isUserConfigured(user) ? "login" : "setup",
     expiresAt,
+    reused: false,
   };
 }
 
@@ -403,7 +425,7 @@ export function getSessionCookie(token, expiresAt) {
     `${ADMIN_SESSION_COOKIE}=${token}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax",
+    "SameSite=Strict",
     secure.trim(),
     `Expires=${new Date(expiresAt).toUTCString()}`,
   ]
@@ -412,7 +434,7 @@ export function getSessionCookie(token, expiresAt) {
 }
 
 export function getClearSessionCookie() {
-  return `${ADMIN_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+  return `${ADMIN_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
 }
 
 export function getCookieValue(request, name) {
