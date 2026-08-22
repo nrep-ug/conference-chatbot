@@ -547,6 +547,89 @@ test("preserves progression and sponsor requests in a compound question", async 
   assert.match(result.answer, /GIZ Uganda/);
 });
 
+test("keeps sponsor and session requests focused unless an overview is explicit", async () => {
+  const snapshot = createSnapshot();
+  snapshot.sponsorCategories.push({
+    $id: "platinum",
+    $tableId: "sponsor-categories",
+    conferenceId: snapshot.conference.$id,
+    name: "Platinum",
+    displayOrder: 0,
+    isActive: true,
+  });
+  snapshot.sponsors.push({
+    $id: "fcdo",
+    $tableId: "sponsors",
+    conferenceId: snapshot.conference.$id,
+    categoryId: "platinum",
+    name: "FCDO",
+    description: "International development partner",
+    siteUrl: "https://example.org/fcdo",
+    displayOrder: 0,
+    isActive: true,
+  });
+
+  const genericSponsors = await getDirectRecAnswer(
+    "Tell me about the sponsors?",
+    { snapshot }
+  );
+  const scopedSponsors = await getDirectRecAnswer(
+    "Tell me about the REC26 and EXPO sponsors",
+    { snapshot }
+  );
+  const sponsorOverview = await getDirectRecAnswer(
+    "Give me an overview of REC26 sponsors",
+    { snapshot }
+  );
+  const sessions = await getDirectRecAnswer(
+    "Tell me more about the REC26 sessions",
+    { snapshot }
+  );
+  const describedSessions = await getDirectRecAnswer(
+    "Describe the REC26 sessions",
+    { snapshot }
+  );
+  const partners = await getDirectRecAnswer("Who are the REC26 partners?", {
+    snapshot,
+  });
+  const categories = await getDirectRecAnswer(
+    "What sponsor categories are available?",
+    { snapshot }
+  );
+  const explicitCompound = await getDirectRecAnswer(
+    "Give me a conference overview including sponsors",
+    { snapshot }
+  );
+
+  for (const result of [genericSponsors, scopedSponsors, sponsorOverview]) {
+    assert.match(result.answer, /^## REC26 & EXPO Sponsors and Partners/);
+    assert.match(result.answer, /### Platinum/);
+    assert.match(result.answer, /\[FCDO\]\(https:\/\/example\.org\/fcdo\)/);
+    assert.match(result.answer, /### Partners/);
+    assert.match(result.answer, /GIZ Uganda/);
+    assert.doesNotMatch(result.answer, /Uganda's renewable energy conference/);
+    assert.doesNotMatch(result.answer, /Daily focus areas/);
+  }
+
+  assert.match(sessions.answer, /listed programme sessions/);
+  assert.doesNotMatch(sessions.answer, /Uganda's renewable energy conference/);
+  assert.match(describedSessions.answer, /listed programme sessions/);
+  assert.doesNotMatch(
+    describedSessions.answer,
+    /Uganda's renewable energy conference/
+  );
+  assert.match(partners.answer, /^## REC26 & EXPO Partners/);
+  assert.doesNotMatch(partners.answer, /### Partners/);
+  assert.match(categories.answer, /^## REC26 & EXPO Sponsor Categories/);
+  assert.match(categories.answer, /\*\*Platinum:\*\* 1 listed sponsor/);
+  assert.match(categories.answer, /\*\*Partners:\*\* 1 listed sponsor/);
+  assert.match(
+    explicitCompound.answer,
+    /Uganda's premier renewable energy conference/
+  );
+  assert.match(explicitCompound.answer, /REC26 & EXPO Sponsors and Partners/);
+});
+
 test("does not mistake unpublished venue logistics for venue location", async () => {
   const snapshot = createSnapshot();
   const wifi = await getDirectRecAnswer("Is Wi-Fi available at the venue?", {

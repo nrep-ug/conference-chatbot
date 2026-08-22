@@ -84,7 +84,7 @@ const CHATBOT_HELP_ANSWER = [
 const OUT_OF_SCOPE_ANSWER =
   "I’m here to help with the Renewable Energy Conference & Expo. Ask me about the venue, visitor guidance, dates, registration, programme sessions, themes, halls, sponsors, previous editions, media, reports, contacts, or website links.";
 const CONFERENCE_TERMS =
-  /\b(conference|rec|expo|serena|venue|location|visitor|guest|register|registration|programme|program|agenda|schedule|session|day|theme|speaker|sponsor|exhibitor|hall|room|contact|website|fee|cost|price|capacity|limit|lunch|meal|tea|break|business forum|giz|fcdo|european union|technology|technologies|technical|ceremony|opening|closing|start|starts|starting|prepare|preparation|planning|maximize|maximise|clean cooking|cooking technolog(?:y|ies)|solar[- ]electric cooking|solco|biofuel|biofuels|geothermal|nuclear|productive use|energy efficiency|previous|past|historical|history|archive|photo|photos|album|gallery|media|video|recording|report|reports|proceedings|communique|outcomes|wifi|internet|parking|shuttle|accessibility|wheelchair|attire|dress code|first aid|bag policy|2022|2023|2024|2025|2026)\b/;
+  /\b(conference|rec(?:\s*[-']?\s*\d{2})?|expo|serena|venues?|locations?|visitors?|guests?|register|registration|programmes?|programs?|agenda|schedules?|sessions?|days?|themes?|speakers?|sponsors?|sponsorship|partners?|exhibitors?|halls?|rooms?|contacts?|websites?|fees?|cost|price|capacity|limits?|lunch|meals?|tea|breaks?|business forum|giz|fcdo|european union|technology|technologies|technical|ceremon(?:y|ies)|opening|closing|start|starts|starting|prepare|preparation|planning|maximize|maximise|clean cooking|cooking technolog(?:y|ies)|solar[- ]electric cooking|solco|biofuel|biofuels|geothermal|nuclear|productive use|energy efficiency|previous|past|historical|history|archive|photos?|images?|albums?|gallery|galleries|media|videos?|recordings?|reports?|documents?|publications?|proceedings|communiques?|outcomes|wifi|internet|parking|shuttle|accessibility|wheelchair|attire|dress code|first aid|bag policy|2022|2023|2024|2025|2026)\b/;
 const OFF_TOPIC_TERMS =
   /\b(joke|jazz|entertain|sing|song|poem|story|weather|news|sports|football|recipe|code|python|javascript|homework|essay|translate|summarize this|crypto|stock|president|politics|hotel|hotels)\b/;
 const GENERAL_KNOWLEDGE_START =
@@ -488,10 +488,23 @@ function mergeSources(...sourceGroups) {
   return merged;
 }
 
-function shouldComplementDirectAnswer(question) {
+function shouldComplementDirectAnswer(question, directAnswer) {
   if (!QDRANT_COMPLEMENT_ENABLED) return false;
 
   const normalized = normalizeQuestion(question);
+  const sourceTypes = new Set(
+    (directAnswer?.sources || []).map((source) => source.sourceType)
+  );
+
+  if (
+    /\b(sponsors?|partners?|sponsorship|sponsor categories|sponsor tiers?)\b/.test(
+      normalized
+    ) ||
+    sourceTypes.has("sponsor") ||
+    sourceTypes.has("sponsor_category")
+  ) {
+    return false;
+  }
 
   return (
     /\b(in depth|in-depth|deep dive|detailed|comprehensive|full view|complete view|overview|summary)\b/.test(
@@ -553,7 +566,7 @@ function appendComplementContext(directAnswer, qdrantContext) {
 }
 
 async function complementDirectAnswer(question, directAnswer, signal, requestId, startedAt) {
-  if (!shouldComplementDirectAnswer(question)) {
+  if (!shouldComplementDirectAnswer(question, directAnswer)) {
     return null;
   }
 

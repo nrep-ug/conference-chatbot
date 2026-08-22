@@ -486,26 +486,104 @@ export function buildRecDocuments(snapshot) {
   );
 }
 
-function answerSponsors(snapshot) {
-  const activeSponsors = snapshot.sponsors
-    .filter((sponsor) => sponsor.isActive !== false)
-    .sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0));
+function getRepresentedSponsorGroups(
+  bundle,
+  { partnersOnly = false, featuredOnly = false } = {}
+) {
+  const categories = [...(bundle.sponsorCategories || [])]
+    .filter((category) => category.isActive !== false)
+    .sort(
+      (left, right) =>
+        (left.displayOrder || 0) - (right.displayOrder || 0) ||
+        String(left.name || "").localeCompare(String(right.name || ""))
+    );
+  const categoriesById = new Map(
+    categories.map((category) => [category.$id, category])
+  );
+  const groups = new Map();
 
-  if (activeSponsors.length === 0) {
+  for (const sponsor of [...(bundle.sponsors || [])]
+    .filter((item) => item.isActive !== false)
+    .filter((item) => !featuredOnly || item.isFeatured === true)
+    .sort(
+      (left, right) =>
+        (left.displayOrder || 0) - (right.displayOrder || 0) ||
+        String(left.name || "").localeCompare(String(right.name || ""))
+    )) {
+    const category = categoriesById.get(sponsor.categoryId) || {
+      $id: "uncategorized",
+      name: "Other",
+      description: "",
+      displayOrder: Number.MAX_SAFE_INTEGER,
+    };
+
+    if (
+      partnersOnly &&
+      canonicalSearchText(category.name) !== "partners"
+    ) {
+      continue;
+    }
+
+    const key = category.$id || category.name;
+    const group = groups.get(key) || { category, sponsors: [] };
+    group.sponsors.push(sponsor);
+    groups.set(key, group);
+  }
+
+  return [...groups.values()].sort(
+    (left, right) =>
+      (left.category.displayOrder || 0) -
+        (right.category.displayOrder || 0) ||
+      String(left.category.name || "").localeCompare(
+        String(right.category.name || "")
+      )
+  );
+}
+
+function formatSponsorGroups(
+  groups,
+  { includeDescriptions = true, includeCategoryHeadings = true } = {}
+) {
+  return groups
+    .map(({ category, sponsors }) => {
+      const sponsorItems = sponsors.map((sponsor) => {
+        const name = sponsor.siteUrl
+          ? `[${sponsor.name}](${sponsor.siteUrl})`
+          : `**${sponsor.name}**`;
+        const description = includeDescriptions
+          ? stripHtml(sponsor.description)
+          : "";
+
+        return description ? `${name}: ${description}` : name;
+      });
+
+      return joinMarkdownSections([
+        includeCategoryHeadings ? `### ${category.name || "Other"}` : null,
+        category.description ? stripHtml(category.description) : null,
+        markdownList(sponsorItems),
+      ]);
+    })
+    .join("\n\n");
+}
+
+function answerSponsors(snapshot) {
+  const groups = getRepresentedSponsorGroups(snapshot);
+  const sponsorCount = groups.reduce(
+    (total, group) => total + group.sponsors.length,
+    0
+  );
+
+  if (sponsorCount === 0) {
     return "No active sponsors are currently listed for the conference.";
   }
 
-  const categoriesById = new Map(
-    snapshot.sponsorCategories.map((category) => [category.$id, category.name])
-  );
-  const sponsorList = activeSponsors.map((sponsor) => {
-      const category = categoriesById.get(sponsor.categoryId);
-    return category ? `${sponsor.name} (${category})` : sponsor.name;
-  });
+  const conferenceName =
+    snapshot.conference.shortName || snapshot.conference.title || "REC & EXPO";
 
   return joinMarkdownSections([
-    "The listed sponsors are:",
-    markdownList(sponsorList),
+    `## ${conferenceName} Sponsors and Partners`,
+    `${sponsorCount} published organisation${sponsorCount === 1 ? " is" : "s are"} currently listed across ${groups.length} represented categor${groups.length === 1 ? "y" : "ies"}.`,
+    formatSponsorGroups(groups),
   ]);
 }
 
@@ -529,20 +607,22 @@ function answerSpecificSponsor(sponsor, snapshot) {
   const category = snapshot.sponsorCategories.find(
     (item) => item.$id === sponsor.categoryId
   );
-  const details = [
-    `${sponsor.name} is listed as a sponsor for ${snapshot.conference.title}.`,
-  ];
+  const conferenceName =
+    snapshot.conference.shortName || snapshot.conference.title;
+  const details = [`## ${sponsor.name}`];
 
   if (category?.name) {
     details.push(`**Category:** ${category.name}`);
   }
+
+  details.push(`**Conference:** ${conferenceName}`);
 
   if (sponsor.description) {
     details.push(stripHtml(sponsor.description));
   }
 
   if (sponsor.siteUrl) {
-    details.push(`**Website:** ${sponsor.siteUrl}`);
+    details.push(`[Visit ${sponsor.name} website](${sponsor.siteUrl})`);
   }
 
   return joinMarkdownSections(details);
@@ -1600,10 +1680,10 @@ function isFilteredSessionQuestion(normalized) {
 
 function isGenericSessionsOverviewQuestion(normalized) {
   return (
-    /\b(tell me more|more|overview|summary|summarise|summarize|in depth|in-depth|detailed|details|view)\b.*\bsessions?\b/.test(
+    /\b(tell me more|tell me about|describe|introduce|more|overview|summary|summarise|summarize|in depth|in-depth|detailed|details|view)\b.*\bsessions?\b/.test(
       normalized
     ) ||
-    /\bsessions?\b.*\b(overview|summary|summarise|summarize|in depth|in-depth|detailed|details|view)\b/.test(
+    /\bsessions?\b.*\b(overview|summary|summarise|summarize|description|in depth|in-depth|detailed|details|view)\b/.test(
       normalized
     )
   );
@@ -1620,29 +1700,51 @@ function isConferenceDeepDiveQuestion(normalized) {
   );
 }
 
+const FOCUSED_CONFERENCE_SUBJECT_PATTERN =
+  /\b(dates?|when|start|starts|starting|end|ends|ending|themes?|daily focus|focus areas?|venues?|locations?|registration|websites?|contacts?|phone|email|capacity|fees?|cost|price|programmes?|programs?|agenda|schedules?|sessions?|speakers?|presenters?|panelists?|sponsors?|sponsorship|partners?|exhibitors?|halls?|rooms?|spaces?|ceremon(?:y|ies)|opening|closing|lunch|tea|breaks?|exhibitions?|photos?|images?|albums?|gallery|galleries|media|videos?|recordings?|reports?|documents?|publications?|proceedings|communiques?|wifi|internet|parking|transport|shuttle|accessibility|wheelchair|catering|meals?|attire|dress code|first aid|security|prepare|preparation|learn|learning|recommendations?|technologies?|finance|investment|policy|cooking|biofuels?|geothermal|nuclear|productive use|energy efficiency)\b/;
+
+function hasFocusedConferenceSubject(normalized) {
+  return FOCUSED_CONFERENCE_SUBJECT_PATTERN.test(normalized);
+}
+
+function isExplicitGeneralConferenceOverviewClause(clause) {
+  const conferenceName =
+    "(?:conference|rec(?:\\s*[-']?\\s*\\d{2})?|expo)";
+  const overviewSyntax = new RegExp(
+    `(?:\\b${conferenceName}\\s+(?:overview|summary)\\b|\\b(?:overview|summary)\\s+(?:of|about)\\s+(?:the\\s+)?${conferenceName}\\b)`,
+    "i"
+  );
+
+  if (!overviewSyntax.test(clause)) return false;
+  if (!hasFocusedConferenceSubject(clause)) return true;
+
+  return /\b(including|along with|as well as|and its)\b|\band (?:the )?(?:sponsors?|partners?|sessions?|programme|program|venue|theme)\b/.test(
+    clause
+  );
+}
+
 function isConferenceOverviewQuestion(normalized) {
-  return (
-    isConferenceDeepDiveQuestion(normalized) ||
-    /\btell me more\b/.test(normalized) ||
-    /(overview|summary|summarise|summarize|about|describe|introduce|what is).*(conference|rec|expo)\b/.test(
-      normalized
-    ) ||
-    /\b(conference|rec26|rec|expo)\s+overview\b/.test(normalized)
+  return splitIntentClauses(normalized).some(
+    (clause) =>
+      isExplicitGeneralConferenceOverviewClause(clause) ||
+      (!hasFocusedConferenceSubject(clause) &&
+        (isConferenceDeepDiveQuestion(clause) ||
+          /\btell me more\b/.test(clause) ||
+          /\b(tell me about|describe|introduce|what is|give me (?:information|details) about)\b.*\b(conference|rec(?:\s*[-']?\s*\d{2})?|expo)\b/.test(
+            clause
+          ) ||
+          /^(?:give me |show me )?(?:an? )?(?:conference )?(?:overview|summary)$/.test(
+            clause
+          )))
   );
 }
 
 function isFocusedConferenceFactQuestion(normalized) {
-  const asksForOverview =
-    /\b(overview|summary|summarise|summarize|tell me more|in depth|in-depth|deep dive|detailed|comprehensive|describe|introduce)\b/.test(
-      normalized
-    );
-
-  return (
-    !asksForOverview &&
-    /\b(theme|dates?|venue|location|registration|website|contact|phone|email|capacity|fees?|cost|price)\b/.test(
-      normalized
-    )
+  const hasExplicitOverview = splitIntentClauses(normalized).some(
+    isExplicitGeneralConferenceOverviewClause
   );
+
+  return hasFocusedConferenceSubject(normalized) && !hasExplicitOverview;
 }
 
 function isOpenEndedSynthesisQuestion(normalized) {
@@ -2290,50 +2392,57 @@ function answerSponsorCategories(snapshot) {
     return "No active sponsor categories are currently listed.";
   }
 
+  const sponsorsByCategory = new Map();
+  for (const sponsor of getActiveSponsors(snapshot)) {
+    sponsorsByCategory.set(
+      sponsor.categoryId,
+      (sponsorsByCategory.get(sponsor.categoryId) || 0) + 1
+    );
+  }
+  const conferenceName =
+    snapshot.conference.shortName || snapshot.conference.title || "REC & EXPO";
+
   return joinMarkdownSections([
-    "The active sponsor categories are:",
-    markdownList(categories.map((category) => category.name)),
+    `## ${conferenceName} Sponsor Categories`,
+    "The published sponsor structure currently contains:",
+    markdownList(
+      categories.map((category) => {
+        const count = sponsorsByCategory.get(category.$id) || 0;
+        return `**${category.name}:** ${count} listed sponsor${count === 1 ? "" : "s"}`;
+      })
+    ),
   ]);
 }
 
 function answerPartners(snapshot) {
-  const categoriesById = getCategoryNameById(snapshot);
-  const partners = getActiveSponsors(snapshot).filter(
-    (sponsor) => normalizeQuestion(categoriesById.get(sponsor.categoryId)) === "partners"
-  );
+  const groups = getRepresentedSponsorGroups(snapshot, { partnersOnly: true });
+  const partners = groups.flatMap((group) => group.sponsors);
 
   if (partners.length === 0) {
     return "No active partners are currently listed for the conference.";
   }
 
+  const conferenceName =
+    snapshot.conference.shortName || snapshot.conference.title || "REC & EXPO";
+
   return joinMarkdownSections([
-    "The listed partners are:",
-    markdownList(
-      partners.map((partner) =>
-        partner.siteUrl ? `${partner.name} (${partner.siteUrl})` : partner.name
-      )
-    ),
+    `## ${conferenceName} Partners`,
+    `${partners.length} published partner${partners.length === 1 ? " is" : "s are"} currently listed.`,
+    formatSponsorGroups(groups, { includeCategoryHeadings: false }),
   ]);
 }
 
 function answerFeaturedSponsors(snapshot) {
-  const categoriesById = getCategoryNameById(snapshot);
-  const featured = getActiveSponsors(snapshot).filter(
-    (sponsor) => sponsor.isFeatured === true
-  );
+  const groups = getRepresentedSponsorGroups(snapshot, { featuredOnly: true });
+  const featured = groups.flatMap((group) => group.sponsors);
 
   if (featured.length === 0) {
     return "No sponsors are currently marked as featured in the published conference data.";
   }
 
   return joinMarkdownSections([
-    "The featured sponsors are:",
-    markdownList(
-      featured.map((sponsor) => {
-        const category = categoriesById.get(sponsor.categoryId);
-        return category ? `${sponsor.name} (${category})` : sponsor.name;
-      })
-    ),
+    "## Featured Sponsors",
+    formatSponsorGroups(groups),
   ]);
 }
 
@@ -2662,15 +2771,8 @@ function formatEditionSessions(bundle, requestedDays, { speakersOnly = false } =
 }
 
 function formatEditionSponsors(bundle, { partnersOnly = false } = {}) {
-  const categories = new Map(
-    (bundle.sponsorCategories || []).map((category) => [category.$id, category.name])
-  );
-  const sponsors = (bundle.sponsors || [])
-    .filter((sponsor) => sponsor.isActive !== false)
-    .filter((sponsor) => {
-      if (!partnersOnly) return true;
-      return canonicalSearchText(categories.get(sponsor.categoryId)) === "partners";
-    });
+  const groups = getRepresentedSponsorGroups(bundle, { partnersOnly });
+  const sponsors = groups.flatMap((group) => group.sponsors);
 
   if (sponsors.length === 0) {
     return partnersOnly
@@ -2678,13 +2780,7 @@ function formatEditionSponsors(bundle, { partnersOnly = false } = {}) {
       : "No published sponsors are listed for this edition.";
   }
 
-  return markdownList(
-    sponsors.map((sponsor) => {
-      const category = categories.get(sponsor.categoryId);
-      const label = category ? `${sponsor.name} (${category})` : sponsor.name;
-      return sponsor.siteUrl ? `[${label}](${sponsor.siteUrl})` : label;
-    })
-  );
+  return formatSponsorGroups(groups);
 }
 
 function formatEditionMedia(bundle) {
@@ -3828,21 +3924,21 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
     } else if (/featured/.test(normalized)) {
       addPart(
         answerFeaturedSponsors(snapshot),
-        snapshot.sponsors.map((sponsor) =>
-          sourceFor("sponsor", sponsor, sponsor.name)
-        )
+        getActiveSponsors(snapshot)
+          .filter((sponsor) => sponsor.isFeatured === true)
+          .map((sponsor) => sourceFor("sponsor", sponsor, sponsor.name))
       );
     } else {
       addPart(
         answerSponsors(snapshot),
-        snapshot.sponsors.map((sponsor) =>
+        getActiveSponsors(snapshot).map((sponsor) =>
           sourceFor("sponsor", sponsor, sponsor.name)
         )
       );
     }
   }
 
-  if (/partners?/.test(normalized)) {
+  if (/partners?/.test(normalized) && !/sponsors?/.test(normalized)) {
     const categoriesById = getCategoryNameById(snapshot);
     addPart(
       answerPartners(snapshot),
@@ -4610,37 +4706,32 @@ export async function getDirectRecAnswer(
 
   if (/sponsor/.test(normalized)) {
     if (/(categor|tiers?|levels?)/.test(normalized)) {
+      const activeCategories = snapshot.sponsorCategories.filter(
+        (category) => category.isActive !== false
+      );
+
       return {
         answer: answerSponsorCategories(snapshot),
-        sources: [
-          ...sources,
-          ...snapshot.sponsorCategories.map((category) =>
-            sourceFor("sponsor_category", category, category.name)
-          ),
-        ],
+        sources: activeCategories.map((category) =>
+          sourceFor("sponsor_category", category, category.name)
+        ),
       };
     }
 
     if (/featured/.test(normalized)) {
       return {
         answer: answerFeaturedSponsors(snapshot),
-        sources: [
-          ...sources,
-          ...snapshot.sponsors.map((sponsor) =>
-            sourceFor("sponsor", sponsor, sponsor.name)
-          ),
-        ],
+        sources: getActiveSponsors(snapshot).map((sponsor) =>
+          sourceFor("sponsor", sponsor, sponsor.name)
+        ),
       };
     }
 
     return {
       answer: answerSponsors(snapshot),
-      sources: [
-        ...sources,
-        ...snapshot.sponsors.map((sponsor) =>
-          sourceFor("sponsor", sponsor, sponsor.name)
-        ),
-      ],
+      sources: getActiveSponsors(snapshot).map((sponsor) =>
+        sourceFor("sponsor", sponsor, sponsor.name)
+      ),
     };
   }
 
@@ -4652,10 +4743,9 @@ export async function getDirectRecAnswer(
 
     return {
       answer: answerPartners(snapshot),
-      sources: [
-        ...sources,
-        ...partners.map((partner) => sourceFor("sponsor", partner, partner.name)),
-      ],
+      sources: partners.map((partner) =>
+        sourceFor("sponsor", partner, partner.name)
+      ),
     };
   }
 
