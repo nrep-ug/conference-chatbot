@@ -1,7 +1,16 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  /* config options here */
   reactCompiler: true,
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "appwrite.nrep.ug",
+        port: "",
+        pathname: "/v1/storage/buckets/**",
+      },
+    ],
+  },
   async headers() {
     return [
       {

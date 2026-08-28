@@ -1,7 +1,24 @@
 "use client";
 
+import {
+  Activity,
+  Database,
+  ExternalLink,
+  LockKeyhole,
+  LogOut,
+  Network,
+  Plus,
+  RefreshCw,
+  Save,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  UserRound,
+  Wifi,
+} from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import BrandLogo from "../components/brand-logo";
 
 const EMAIL_STATE = {
   idle: "idle",
@@ -102,104 +119,24 @@ function getGeneratedAge(generatedAt, referenceNow) {
   return hours <= 0 ? "Fresh" : `${hours}h old`;
 }
 
+const iconComponents = {
+  activity: Activity,
+  database: Database,
+  lock: LockKeyhole,
+  refresh: RefreshCw,
+  shield: ShieldCheck,
+  spark: Sparkles,
+  user: UserRound,
+  vector: Network,
+  plus: Plus,
+  save: Save,
+  trash: Trash2,
+  wifi: Wifi,
+};
+
 function Icon({ name, className = "" }) {
-  const common = {
-    className,
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: "1.8",
-    strokeLinecap: "round",
-    strokeLinejoin: "round",
-    "aria-hidden": true,
-  };
-
-  const paths = {
-    activity: (
-      <>
-        <path d="M3 12h4l2.5-6 5 12L17 12h4" />
-      </>
-    ),
-    database: (
-      <>
-        <ellipse cx="12" cy="5" rx="7" ry="3" />
-        <path d="M5 5v7c0 1.7 3.1 3 7 3s7-1.3 7-3V5" />
-        <path d="M5 12v7c0 1.7 3.1 3 7 3s7-1.3 7-3v-7" />
-      </>
-    ),
-    lock: (
-      <>
-        <rect x="5" y="10" width="14" height="10" rx="2" />
-        <path d="M8 10V7a4 4 0 0 1 8 0v3" />
-      </>
-    ),
-    refresh: (
-      <>
-        <path d="M20 6v5h-5" />
-        <path d="M4 18v-5h5" />
-        <path d="M18.4 9A7 7 0 0 0 6.2 6.8L4 9" />
-        <path d="M5.6 15a7 7 0 0 0 12.2 2.2L20 15" />
-      </>
-    ),
-    shield: (
-      <>
-        <path d="M12 3 5 6v5c0 4.3 2.9 8.3 7 9.5 4.1-1.2 7-5.2 7-9.5V6l-7-3Z" />
-        <path d="m9.5 12 1.8 1.8 3.7-4" />
-      </>
-    ),
-    spark: (
-      <>
-        <path d="m12 3 1.5 5L19 9.5 13.5 11 12 17l-1.5-6L5 9.5 10.5 8 12 3Z" />
-        <path d="M19 17v4" />
-        <path d="M17 19h4" />
-      </>
-    ),
-    user: (
-      <>
-        <circle cx="12" cy="8" r="4" />
-        <path d="M5 21a7 7 0 0 1 14 0" />
-      </>
-    ),
-    vector: (
-      <>
-        <path d="M6 7a3 3 0 1 0 0 .1" />
-        <path d="M18 7a3 3 0 1 0 0 .1" />
-        <path d="M12 18a3 3 0 1 0 0 .1" />
-        <path d="M8.5 8.5 10.8 15" />
-        <path d="M15.5 8.5 13.2 15" />
-        <path d="M9 7h6" />
-      </>
-    ),
-    plus: (
-      <>
-        <path d="M12 5v14" />
-        <path d="M5 12h14" />
-      </>
-    ),
-    save: (
-      <>
-        <path d="M5 4h12l2 2v14H5Z" />
-        <path d="M8 4v6h8V4" />
-        <path d="M8 20v-6h8v6" />
-      </>
-    ),
-    trash: (
-      <>
-        <path d="M4 7h16" />
-        <path d="M9 7V4h6v3" />
-        <path d="m7 7 1 13h8l1-13" />
-      </>
-    ),
-    wifi: (
-      <>
-        <path d="M5 12.5a10 10 0 0 1 14 0" />
-        <path d="M8.5 16a5 5 0 0 1 7 0" />
-        <path d="M12 20h.01" />
-      </>
-    ),
-  };
-
-  return <svg {...common}>{paths[name]}</svg>;
+  const Component = iconComponents[name] || Activity;
+  return <Component className={className} strokeWidth={1.8} aria-hidden="true" />;
 }
 
 function StatusPill({ ok, label }) {
@@ -209,13 +146,13 @@ function StatusPill({ ok, label }) {
         "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold",
         ok
           ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-          : "border-amber-200 bg-amber-50 text-amber-700"
+          : "border-[#F3D19F] bg-[#FFF8EE] text-[#9A4A08]"
       )}
     >
       <span
         className={classNames(
           "h-1.5 w-1.5 rounded-full",
-          ok ? "bg-emerald-500" : "bg-amber-500"
+          ok ? "bg-emerald-500" : "bg-[#EFA74F]"
         )}
       />
       {label}
@@ -223,21 +160,28 @@ function StatusPill({ ok, label }) {
   );
 }
 
-function MetricCard({ icon, label, value, detail }) {
+function MetricCard({ icon, label, value, detail, tone = "primary" }) {
+  const iconTone =
+    tone === "secondary"
+      ? "bg-[#FFF2E2] text-[#B45309]"
+      : tone === "light"
+        ? "bg-[#E5F3F8] text-[#176F91]"
+        : "bg-[#176F91] text-white";
+
   return (
-    <article className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <article className="rounded-lg border border-[#D5E0E4] bg-white p-5 shadow-[0_1px_3px_rgba(20,38,45,0.05)]">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-sm font-medium text-slate-500">{label}</p>
-          <p className="mt-2 text-2xl font-semibold tracking-normal text-slate-950">
+          <p className="text-sm font-medium text-[#617780]">{label}</p>
+          <p className="mt-2 text-2xl font-semibold tracking-normal text-[#14262D]">
             {value}
           </p>
         </div>
-        <div className="flex h-10 w-10 items-center justify-center rounded-md bg-slate-950 text-white">
+        <div className={`flex h-10 w-10 items-center justify-center rounded-md ${iconTone}`}>
           <Icon name={icon} className="h-5 w-5" />
         </div>
       </div>
-      {detail && <p className="mt-4 text-sm leading-6 text-slate-500">{detail}</p>}
+      {detail && <p className="mt-4 text-sm leading-6 text-[#617780]">{detail}</p>}
     </article>
   );
 }
@@ -356,20 +300,20 @@ function KnowledgeEditor({ onStatusRefresh }) {
   return (
     <section
       id="venue-knowledge"
-      className="mt-6 rounded-lg border border-slate-200 bg-white shadow-sm"
+      className="mt-6 rounded-lg border border-[#D5E0E4] bg-white shadow-[0_1px_3px_rgba(20,38,45,0.05)]"
     >
-      <div className="flex flex-col gap-4 border-b border-slate-200 p-5 lg:flex-row lg:items-start lg:justify-between">
+      <div className="flex flex-col gap-4 border-b border-[#D5E0E4] p-5 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <Icon name="wifi" className="h-5 w-5 text-emerald-600" />
+            <Icon name="wifi" className="h-5 w-5 text-[#176F91]" />
             <h2 className="text-lg font-semibold">Venue and visitor knowledge</h2>
           </div>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-[#617780]">
             {conference
               ? `${conference.shortName || conference.title} (${conference.year})`
               : "Active conference"}
           </p>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-amber-700">
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-[#9A4A08]">
             Published entries become public chatbot answers. Add only guest Wi-Fi
             details and public visitor guidance; never store staff networks,
             internal systems, or private credentials here.
@@ -379,7 +323,7 @@ function KnowledgeEditor({ onStatusRefresh }) {
           type="button"
           onClick={() => setItems((current) => [...current, createKnowledgeItem()])}
           disabled={loading || Boolean(busyAction)}
-          className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+          className="inline-flex items-center justify-center gap-2 rounded-md border border-[#AFC4CC] px-4 py-2.5 text-sm font-semibold text-[#29434D] transition hover:border-[#79B5CC] hover:bg-[#F1F8FA] disabled:cursor-not-allowed disabled:text-[#9DAEB5]"
         >
           <Icon name="plus" className="h-4 w-4" />
           Add entry
@@ -387,11 +331,11 @@ function KnowledgeEditor({ onStatusRefresh }) {
       </div>
 
       {loading ? (
-        <div className="p-5 text-sm text-slate-500">Loading published knowledge...</div>
+        <div className="p-5 text-sm text-[#617780]">Loading published knowledge...</div>
       ) : (
-        <div className="divide-y divide-slate-200">
+        <div className="divide-y divide-[#D5E0E4]">
           {items.length === 0 && (
-            <div className="p-5 text-sm text-slate-500">
+            <div className="p-5 text-sm text-[#617780]">
               No venue or visitor entries have been added.
             </div>
           )}
@@ -399,7 +343,7 @@ function KnowledgeEditor({ onStatusRefresh }) {
             <div key={item.clientId} className="p-5">
               <div className="grid gap-4 lg:grid-cols-[180px_1fr_auto] lg:items-start">
                 <label className="block">
-                  <span className="text-xs font-semibold uppercase text-slate-500">
+                  <span className="text-xs font-semibold uppercase text-[#617780]">
                     Category
                   </span>
                   <select
@@ -407,7 +351,7 @@ function KnowledgeEditor({ onStatusRefresh }) {
                     onChange={(event) =>
                       updateItem(item.clientId, "category", event.target.value)
                     }
-                    className="mt-2 w-full rounded-md border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                    className="mt-2 w-full rounded-md border border-[#B9CBD2] bg-white px-3 py-2.5 text-sm outline-none focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
                   >
                     {knowledgeCategories.map(([value, label]) => (
                       <option key={value} value={value}>
@@ -417,7 +361,7 @@ function KnowledgeEditor({ onStatusRefresh }) {
                   </select>
                 </label>
                 <label className="block">
-                  <span className="text-xs font-semibold uppercase text-slate-500">
+                  <span className="text-xs font-semibold uppercase text-[#617780]">
                     Public topic
                   </span>
                   <input
@@ -427,7 +371,7 @@ function KnowledgeEditor({ onStatusRefresh }) {
                     }
                     maxLength={140}
                     placeholder="Guest Wi-Fi access"
-                    className="mt-2 w-full rounded-md border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                    className="mt-2 w-full rounded-md border border-[#B9CBD2] px-3 py-2.5 text-sm outline-none focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
                   />
                 </label>
                 <button
@@ -441,7 +385,7 @@ function KnowledgeEditor({ onStatusRefresh }) {
                 </button>
               </div>
               <label className="mt-4 block">
-                <span className="text-xs font-semibold uppercase text-slate-500">
+                <span className="text-xs font-semibold uppercase text-[#617780]">
                   Public answer
                 </span>
                 <textarea
@@ -452,12 +396,12 @@ function KnowledgeEditor({ onStatusRefresh }) {
                   maxLength={3000}
                   rows={3}
                   placeholder="Connect to the public guest network..."
-                  className="mt-2 w-full resize-y rounded-md border border-slate-300 px-3 py-2.5 text-sm leading-6 outline-none focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                  className="mt-2 w-full resize-y rounded-md border border-[#B9CBD2] px-3 py-2.5 text-sm leading-6 outline-none focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
                 />
               </label>
               <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
                 <label className="block">
-                  <span className="text-xs font-semibold uppercase text-slate-500">
+                  <span className="text-xs font-semibold uppercase text-[#617780]">
                     Matching keywords
                   </span>
                   <input
@@ -466,17 +410,17 @@ function KnowledgeEditor({ onStatusRefresh }) {
                       updateItem(item.clientId, "keywordsText", event.target.value)
                     }
                     placeholder="wifi, internet, password, connectivity"
-                    className="mt-2 w-full rounded-md border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                    className="mt-2 w-full rounded-md border border-[#B9CBD2] px-3 py-2.5 text-sm outline-none focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
                   />
                 </label>
-                <label className="flex h-11 items-center gap-3 rounded-md border border-slate-300 px-4 text-sm font-semibold text-slate-700">
+                <label className="flex h-11 items-center gap-3 rounded-md border border-[#B9CBD2] px-4 text-sm font-semibold text-[#29434D]">
                   <input
                     type="checkbox"
                     checked={item.isPublished}
                     onChange={(event) =>
                       updateItem(item.clientId, "isPublished", event.target.checked)
                     }
-                    className="h-4 w-4 accent-emerald-600"
+                    className="h-4 w-4 accent-[#176F91]"
                   />
                   Published
                 </label>
@@ -486,11 +430,11 @@ function KnowledgeEditor({ onStatusRefresh }) {
         </div>
       )}
 
-      <div className="flex flex-col gap-3 border-t border-slate-200 bg-slate-50 p-5 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 border-t border-[#D5E0E4] bg-[#F7F9FA] p-5 sm:flex-row sm:items-center sm:justify-between">
         <div
           className={classNames(
             "text-sm",
-            hasError ? "text-red-700" : "text-slate-600"
+            hasError ? "text-red-700" : "text-[#526B75]"
           )}
         >
           {notice || `${items.filter((item) => item.isPublished).length} public entr${
@@ -502,7 +446,7 @@ function KnowledgeEditor({ onStatusRefresh }) {
             type="button"
             onClick={() => saveKnowledge(false)}
             disabled={loading || Boolean(busyAction)}
-            className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+            className="inline-flex items-center justify-center gap-2 rounded-md bg-[#176F91] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#0B5E78] disabled:cursor-not-allowed disabled:bg-[#AEC0C7]"
           >
             <Icon name="save" className="h-4 w-4" />
             {busyAction === "save" ? "Saving..." : "Save changes"}
@@ -511,7 +455,7 @@ function KnowledgeEditor({ onStatusRefresh }) {
             type="button"
             onClick={() => saveKnowledge(true)}
             disabled={loading || Boolean(busyAction)}
-            className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+            className="inline-flex items-center justify-center gap-2 rounded-md border border-[#AFC4CC] bg-white px-4 py-2.5 text-sm font-semibold text-[#29434D] transition hover:border-[#79B5CC] hover:bg-[#F1F8FA] disabled:cursor-not-allowed disabled:text-[#9DAEB5]"
           >
             <Icon name="vector" className="h-4 w-4" />
             {busyAction === "qdrant" ? "Rebuilding..." : "Save + rebuild Qdrant"}
@@ -574,155 +518,175 @@ function AuthPanel({ authState, onAuthenticated }) {
   }
 
   return (
-    <main className="min-h-screen bg-slate-950 text-white">
-      <div className="mx-auto grid min-h-screen max-w-6xl gap-10 px-6 py-8 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
-        <section className="py-8">
-          <div className="inline-flex h-12 w-12 items-center justify-center rounded-lg bg-emerald-400 text-slate-950">
-            <Icon name="shield" className="h-6 w-6" />
+    <main className="min-h-screen bg-[#F4F7F8] text-[#14262D]">
+      <div className="grid min-h-screen lg:grid-cols-[minmax(360px,0.9fr)_minmax(520px,1.1fr)]">
+        <section className="flex flex-col border-t-4 border-[#EFA74F] bg-[#0B5E78] px-6 py-5 text-white sm:px-10 lg:px-14 lg:py-10">
+          <div className="flex items-center gap-3">
+            <BrandLogo
+              className="h-14 w-14 rounded-md border border-white/25"
+              priority
+            />
+            <div>
+              <p className="text-lg font-semibold">NREP</p>
+              <p className="text-xs text-[#B9DCE9]">Conference intelligence</p>
+            </div>
           </div>
-          <h1 className="mt-8 max-w-xl text-4xl font-semibold leading-tight tracking-normal sm:text-5xl">
-            REC Bot Admin Console
-          </h1>
-          <p className="mt-5 max-w-2xl text-base leading-8 text-slate-300">
-            Manage the chatbot data pipeline, vector index, runtime health, and
-            secure admin access from one quiet operational surface.
+
+          <div className="max-w-xl py-7 lg:my-auto lg:py-16">
+            <p className="text-xs font-semibold uppercase text-[#F5C078]">
+              Protected administration
+            </p>
+            <h1 className="mt-3 text-2xl font-semibold leading-tight sm:text-3xl lg:mt-4 lg:text-4xl">
+              REC Assistant Operations
+            </h1>
+            <p className="mt-4 text-sm leading-6 text-[#D5EBF3] sm:text-base sm:leading-7 lg:mt-5 lg:leading-8">
+              Manage conference data, visitor guidance, retrieval services, and
+              the health of the public assistant from one controlled workspace.
+            </p>
+            <div className="mt-8 hidden space-y-4 border-t border-white/15 pt-6 lg:block">
+              {[
+                "Email verification required for every sign-in",
+                "Server-side password derivation and secure sessions",
+                "Restricted access for approved administrators",
+              ].map((item) => (
+                <div key={item} className="flex items-start gap-3 text-sm text-[#D5EBF3]">
+                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#F5C078]" />
+                  <span>{item}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <p className="hidden text-xs text-[#9DCBDB] lg:block">
+            Renewable Energy Conference & Expo
           </p>
-          <div className="mt-8 grid gap-3 text-sm text-slate-300 sm:grid-cols-2">
-            {[
-              "Email verification before every sign-in",
-              "Server-side scrypt password storage",
-              "HttpOnly session cookie",
-              "Runtime JSON account store",
-            ].map((item) => (
-              <div
-                key={item}
-                className="rounded-md border border-white/10 bg-white/[0.04] px-4 py-3"
-              >
-                {item}
-              </div>
-            ))}
-          </div>
         </section>
 
-        <section className="rounded-lg border border-white/10 bg-white p-6 text-slate-950 shadow-2xl">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h2 className="text-xl font-semibold">Admin access</h2>
-              <p className="mt-1 text-sm leading-6 text-slate-500">
-                Use an allowed email address. The first sign-in for an allowed
-                email will complete account setup.
-              </p>
-            </div>
-            <StatusPill
-              ok={authState?.auth?.hasStableSecret}
-              label={authState?.auth?.hasStableSecret ? "Stable secret" : "Secret needed"}
-            />
-          </div>
-
-          {emailState === EMAIL_STATE.idle ? (
-            <form onSubmit={requestCode} className="mt-8 space-y-5">
-              <label className="block">
-                <span className="text-sm font-medium text-slate-700">Email</span>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  required
-                  className="mt-2 w-full rounded-md border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-slate-950 focus:ring-4 focus:ring-slate-200"
-                  placeholder="name@example.com"
-                />
-              </label>
-              {error && (
-                <p className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                  {error}
+        <section className="grid place-items-center px-4 py-10 sm:px-8 lg:px-12">
+          <div className="w-full max-w-md rounded-lg border border-[#D5E0E4] border-t-4 border-t-[#2E9ECC] bg-white p-6 shadow-[0_18px_50px_rgba(20,38,45,0.10)] sm:p-8">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-semibold">Admin access</h2>
+                <p className="mt-2 text-sm leading-6 text-[#617780]">
+                  Continue with an approved email address. New administrators
+                  complete their account setup after email verification.
                 </p>
-              )}
-              <button
-                type="submit"
-                disabled={busy}
-                className="flex w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
-              >
-                <Icon name="lock" className="h-4 w-4" />
-                {busy ? "Sending code..." : "Send verification code"}
-              </button>
-            </form>
-          ) : (
-            <form onSubmit={submitCredentials} className="mt-8 space-y-5">
-              <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-                Verification code sent to {email}.{" "}
-                {expiresAt ? `Expires ${new Date(expiresAt).toLocaleTimeString()}.` : ""}
               </div>
-              {mode === "setup" && (
+              <StatusPill
+                ok={authState?.auth?.hasStableSecret}
+                label={authState?.auth?.hasStableSecret ? "Protected" : "Setup needed"}
+              />
+            </div>
+
+            {emailState === EMAIL_STATE.idle ? (
+              <form onSubmit={requestCode} className="mt-8 space-y-5">
                 <label className="block">
-                  <span className="text-sm font-medium text-slate-700">
-                    Username
-                  </span>
+                  <span className="text-sm font-medium text-[#29434D]">Email address</span>
                   <input
-                    value={username}
-                    onChange={(event) => setUsername(event.target.value)}
+                    type="email"
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
                     required
-                    minLength={3}
-                    className="mt-2 w-full rounded-md border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-slate-950 focus:ring-4 focus:ring-slate-200"
-                    placeholder="admin"
+                    autoComplete="email"
+                    className="mt-2 w-full rounded-md border border-[#B9CBD2] px-4 py-3 text-sm outline-none transition focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
+                    placeholder="name@example.com"
                   />
                 </label>
-              )}
-              <label className="block">
-                <span className="text-sm font-medium text-slate-700">Password</span>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  required
-                  minLength={10}
-                  className="mt-2 w-full rounded-md border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-slate-950 focus:ring-4 focus:ring-slate-200"
-                  placeholder="Minimum 10 characters"
-                />
-              </label>
-              <label className="block">
-                <span className="text-sm font-medium text-slate-700">
-                  Verification code
-                </span>
-                <input
-                  inputMode="numeric"
-                  value={code}
-                  onChange={(event) => setCode(event.target.value)}
-                  required
-                  minLength={6}
-                  maxLength={6}
-                  className="mt-2 w-full rounded-md border border-slate-300 px-4 py-3 text-sm tracking-[0.25em] outline-none transition focus:border-slate-950 focus:ring-4 focus:ring-slate-200"
-                  placeholder="000000"
-                />
-              </label>
-              {error && (
-                <p className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                  {error}
-                </p>
-              )}
-              <div className="flex flex-col gap-3 sm:flex-row">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEmailState(EMAIL_STATE.idle);
-                    setCode("");
-                    setPassword("");
-                    setError("");
-                  }}
-                  className="rounded-md border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                >
-                  Change email
-                </button>
+                {error && (
+                  <p className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {error}
+                  </p>
+                )}
                 <button
                   type="submit"
                   disabled={busy}
-                  className="flex flex-1 items-center justify-center gap-2 rounded-md bg-slate-950 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                  className="flex w-full items-center justify-center gap-2 rounded-md bg-[#176F91] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#0B5E78] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2E9ECC] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-[#AEC0C7]"
                 >
-                  <Icon name="shield" className="h-4 w-4" />
-                  {busy ? "Verifying..." : mode === "setup" ? "Create account" : "Sign in"}
+                  <LockKeyhole className="h-4 w-4" />
+                  {busy ? "Sending code..." : "Send verification code"}
                 </button>
-              </div>
-            </form>
-          )}
+              </form>
+            ) : (
+              <form onSubmit={submitCredentials} className="mt-8 space-y-5">
+                <div className="rounded-md border border-[#B7D9E6] bg-[#F1F8FA] px-4 py-3 text-sm text-[#0B5E78]">
+                  Verification code sent to {email}.{" "}
+                  {expiresAt ? `Expires ${new Date(expiresAt).toLocaleTimeString()}.` : ""}
+                </div>
+                {mode === "setup" && (
+                  <label className="block">
+                    <span className="text-sm font-medium text-[#29434D]">
+                      Username
+                    </span>
+                    <input
+                      value={username}
+                      onChange={(event) => setUsername(event.target.value)}
+                      required
+                      minLength={3}
+                      autoComplete="username"
+                      className="mt-2 w-full rounded-md border border-[#B9CBD2] px-4 py-3 text-sm outline-none transition focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
+                      placeholder="admin"
+                    />
+                  </label>
+                )}
+                <label className="block">
+                  <span className="text-sm font-medium text-[#29434D]">Password</span>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    required
+                    minLength={10}
+                    autoComplete={mode === "setup" ? "new-password" : "current-password"}
+                    className="mt-2 w-full rounded-md border border-[#B9CBD2] px-4 py-3 text-sm outline-none transition focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
+                    placeholder="Minimum 10 characters"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-sm font-medium text-[#29434D]">
+                    Verification code
+                  </span>
+                  <input
+                    inputMode="numeric"
+                    value={code}
+                    onChange={(event) => setCode(event.target.value)}
+                    required
+                    minLength={6}
+                    maxLength={6}
+                    autoComplete="one-time-code"
+                    className="mt-2 w-full rounded-md border border-[#B9CBD2] px-4 py-3 text-sm tracking-[0.25em] outline-none transition focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
+                    placeholder="000000"
+                  />
+                </label>
+                {error && (
+                  <p className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {error}
+                  </p>
+                )}
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmailState(EMAIL_STATE.idle);
+                      setCode("");
+                      setPassword("");
+                      setError("");
+                    }}
+                    className="rounded-md border border-[#AFC4CC] px-4 py-3 text-sm font-semibold text-[#29434D] transition hover:bg-[#F1F8FA]"
+                  >
+                    Change email
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={busy}
+                    className="flex flex-1 items-center justify-center gap-2 rounded-md bg-[#176F91] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#0B5E78] disabled:cursor-not-allowed disabled:bg-[#AEC0C7]"
+                  >
+                    <ShieldCheck className="h-4 w-4" />
+                    {busy ? "Verifying..." : mode === "setup" ? "Create account" : "Sign in"}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
         </section>
       </div>
     </main>
@@ -761,19 +725,31 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
   const generatedAge = getGeneratedAge(snapshot?.generatedAt, status?.receivedAt);
 
   return (
-    <main className="min-h-screen bg-slate-100 text-slate-950">
-      <div className="grid min-h-screen lg:grid-cols-[280px_1fr]">
-        <aside className="border-b border-slate-200 bg-slate-950 px-6 py-6 text-white lg:border-b-0">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-md bg-emerald-400 text-slate-950">
-              <Icon name="spark" className="h-5 w-5" />
+    <main className="min-h-screen bg-[#F4F7F8] text-[#14262D]">
+      <div className="grid min-h-screen lg:grid-cols-[260px_minmax(0,1fr)]">
+        <aside className="border-t-4 border-[#EFA74F] bg-[#0B5E78] px-4 py-4 text-white lg:sticky lg:top-0 lg:h-screen lg:px-5 lg:py-6">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <BrandLogo
+                className="h-11 w-11 rounded-md border border-white/25"
+                priority
+              />
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">REC Assistant</p>
+                <p className="text-xs text-[#B9DCE9]">Administration</p>
+              </div>
             </div>
-            <div>
-              <p className="text-sm font-semibold">REC Bot</p>
-              <p className="text-xs text-slate-400">Admin Console</p>
-            </div>
+            <button
+              type="button"
+              onClick={onLogout}
+              title="Sign out"
+              aria-label="Sign out"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-white/20 text-[#D5EBF3] transition hover:bg-white/10 lg:hidden"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
           </div>
-          <nav className="mt-10 space-y-2 text-sm">
+          <nav className="mt-5 flex gap-2 overflow-x-auto pb-1 text-sm lg:mt-10 lg:block lg:space-y-1 lg:overflow-visible lg:pb-0">
             {[
               ["activity", "Overview"],
               ["database", "Data refresh"],
@@ -785,8 +761,10 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
                 key={label}
                 href={`#${label.toLowerCase().replace(" ", "-")}`}
                 className={classNames(
-                  "flex items-center gap-3 rounded-md px-3 py-2.5 transition hover:bg-white/10",
-                  index === 0 ? "bg-white/10 text-white" : "text-slate-300"
+                  "flex shrink-0 items-center gap-2 rounded-md px-3 py-2.5 transition hover:bg-white/10 lg:w-full lg:gap-3",
+                  index === 0
+                    ? "bg-white/12 text-white"
+                    : "text-[#CBE7F2]"
                 )}
               >
                 <Icon name={icon} className="h-4 w-4" />
@@ -794,26 +772,27 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
               </a>
             ))}
           </nav>
-          <div className="mt-10 rounded-md border border-white/10 bg-white/[0.04] p-4">
+          <div className="mt-10 hidden rounded-md border border-white/15 bg-white/[0.05] p-4 lg:block">
             <p className="text-sm font-medium">{user?.username || user?.email}</p>
-            <p className="mt-1 text-xs text-slate-400">{user?.email}</p>
+            <p className="mt-1 break-all text-xs text-[#B9DCE9]">{user?.email}</p>
             <button
               onClick={onLogout}
-              className="mt-4 w-full rounded-md border border-white/15 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
+              className="mt-4 flex w-full items-center justify-center gap-2 rounded-md border border-white/20 px-3 py-2 text-sm font-semibold text-[#E4F2F7] transition hover:bg-white/10"
             >
+              <LogOut className="h-4 w-4" />
               Sign out
             </button>
           </div>
         </aside>
 
-        <section className="px-5 py-6 sm:px-8 lg:px-10">
-          <header className="flex flex-col gap-4 border-b border-slate-200 pb-6 lg:flex-row lg:items-end lg:justify-between">
+        <section className="min-w-0 px-4 py-6 sm:px-7 lg:px-9 xl:px-10">
+          <header className="flex flex-col gap-4 border-b border-[#D5E0E4] pb-6 lg:flex-row lg:items-end lg:justify-between">
             <div>
-              <p className="text-sm font-medium text-slate-500">
+              <p className="text-sm font-medium text-[#176F91]">
                 Renewable Energy Conference & Expo
               </p>
-              <h1 className="mt-2 text-3xl font-semibold tracking-normal sm:text-4xl">
-                Bot Operations
+              <h1 className="mt-2 text-3xl font-semibold tracking-normal text-[#14262D] sm:text-4xl">
+                Assistant Operations
               </h1>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -829,36 +808,40 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
               label="Active sessions"
               value={snapshot?.counts?.sessions ?? "-"}
               detail={snapshot?.conference?.shortName || "Current REC conference"}
+              tone="primary"
             />
             <MetricCard
               icon="activity"
               label="Snapshot age"
               value={generatedAge}
               detail={snapshot?.generatedAt ? new Date(snapshot.generatedAt).toLocaleString() : "No generated snapshot found"}
+              tone="secondary"
             />
             <MetricCard
               icon="vector"
               label="Vector points"
               value={vectorStore?.pointsCount ?? vectorStore?.vectorsCount ?? "-"}
               detail={vectorStore?.collection || "Qdrant collection"}
+              tone="light"
             />
             <MetricCard
               icon="user"
               label="Previous editions"
               value={snapshot?.counts?.previousConferences ?? "-"}
               detail={`${snapshot?.counts?.historicalMediaItems ?? 0} media, ${snapshot?.counts?.historicalReports ?? 0} reports`}
+              tone="secondary"
             />
           </div>
 
           <div className="mt-6 grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
             <section
               id="data-refresh"
-              className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm"
+              className="rounded-lg border border-[#D5E0E4] bg-white p-5 shadow-[0_1px_3px_rgba(20,38,45,0.05)]"
             >
               <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <h2 className="text-lg font-semibold">Data controls</h2>
-                  <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">
+                  <p className="mt-1 max-w-2xl text-sm leading-6 text-[#617780]">
                     Pull all public REC editions from Appwrite, regenerate the
                     active and historical snapshot, and optionally rebuild
                     Qdrant for semantic context.
@@ -868,7 +851,7 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
                   <button
                     onClick={() => refreshBot(false)}
                     disabled={Boolean(busyAction)}
-                    className="flex items-center justify-center gap-2 rounded-md bg-slate-950 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                    className="flex items-center justify-center gap-2 rounded-md bg-[#176F91] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#0B5E78] disabled:cursor-not-allowed disabled:bg-[#AEC0C7]"
                   >
                     <Icon name="refresh" className="h-4 w-4" />
                     {busyAction === "snapshot" ? "Refreshing..." : "Refresh snapshot"}
@@ -876,7 +859,7 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
                   <button
                     onClick={() => refreshBot(true)}
                     disabled={Boolean(busyAction)}
-                    className="flex items-center justify-center gap-2 rounded-md border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                    className="flex items-center justify-center gap-2 rounded-md border border-[#AFC4CC] px-4 py-3 text-sm font-semibold text-[#29434D] transition hover:border-[#79B5CC] hover:bg-[#F1F8FA] disabled:cursor-not-allowed disabled:text-[#9DAEB5]"
                   >
                     <Icon name="vector" className="h-4 w-4" />
                     {busyAction === "qdrant" ? "Rebuilding..." : "Refresh + rebuild Qdrant"}
@@ -885,7 +868,7 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
               </div>
 
               {notice && (
-                <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                <div className="mt-4 rounded-md border border-[#B7D9E6] bg-[#F1F8FA] px-4 py-3 text-sm text-[#29434D]">
                   {notice}
                 </div>
               )}
@@ -906,9 +889,9 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
                 ].map(([label, value]) => (
                   <div
                     key={label}
-                    className="rounded-md border border-slate-200 bg-slate-50 px-4 py-3"
+                    className="rounded-md border border-[#D5E0E4] bg-[#F7F9FA] px-4 py-3"
                   >
-                    <p className="text-xs font-medium uppercase text-slate-500">
+                    <p className="text-xs font-medium uppercase text-[#617780]">
                       {label}
                     </p>
                     <p className="mt-1 text-lg font-semibold">{value ?? "-"}</p>
@@ -919,18 +902,18 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
 
             <section
               id="vector-index"
-              className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm"
+              className="rounded-lg border border-[#D5E0E4] bg-white p-5 shadow-[0_1px_3px_rgba(20,38,45,0.05)]"
             >
               <h2 className="text-lg font-semibold">Runtime profile</h2>
               {!vectorStore?.ok && (
-                <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                <div className="mt-4 rounded-md border border-[#F3D19F] bg-[#FFF8EE] px-4 py-3 text-sm text-[#8A450B]">
                   <p className="font-semibold">{vectorStore?.message}</p>
                   {vectorStore?.nextAction && (
                     <p className="mt-1 leading-6">{vectorStore.nextAction}</p>
                   )}
                 </div>
               )}
-              <div className="mt-4 divide-y divide-slate-100">
+              <div className="mt-4 divide-y divide-[#E8EEF0]">
                 {[
                   ["Qdrant collection", vectorStore?.collection],
                   ["Qdrant points", vectorStore?.pointsCount ?? "-"],
@@ -958,8 +941,8 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
                   ],
                 ].map(([label, value]) => (
                   <div key={label} className="flex items-center justify-between gap-4 py-3">
-                    <span className="text-sm text-slate-500">{label}</span>
-                    <span className="text-right text-sm font-semibold text-slate-900">
+                    <span className="text-sm text-[#617780]">{label}</span>
+                    <span className="text-right text-sm font-semibold text-[#203A44]">
                       {value || "-"}
                     </span>
                   </div>
@@ -973,18 +956,18 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
           <div className="mt-6 grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
             <section
               id="access"
-              className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm"
+              className="rounded-lg border border-[#D5E0E4] bg-white p-5 shadow-[0_1px_3px_rgba(20,38,45,0.05)]"
             >
               <h2 className="text-lg font-semibold">Access list</h2>
               <div className="mt-4 space-y-3">
                 {(auth?.users || []).map((adminUser) => (
                   <div
                     key={adminUser.email}
-                    className="flex items-center justify-between gap-4 rounded-md border border-slate-200 px-4 py-3"
+                    className="flex items-center justify-between gap-4 rounded-md border border-[#D5E0E4] px-4 py-3"
                   >
                     <div>
                       <p className="text-sm font-semibold">{adminUser.email}</p>
-                      <p className="text-xs text-slate-500">
+                      <p className="text-xs text-[#617780]">
                         {adminUser.username || "Not configured"}
                       </p>
                     </div>
@@ -997,13 +980,13 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
               </div>
             </section>
 
-            <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+            <section className="rounded-lg border border-[#D5E0E4] bg-white p-5 shadow-[0_1px_3px_rgba(20,38,45,0.05)]">
               <h2 className="text-lg font-semibold">Suggested live checks</h2>
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 {quickChecks.map((item) => (
                   <div
                     key={item}
-                    className="rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700"
+                    className="rounded-md border border-[#D5E0E4] bg-[#F7F9FA] px-4 py-3 text-sm text-[#3B555F]"
                   >
                     {item}
                   </div>
@@ -1011,9 +994,10 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
               </div>
               <Link
                 href="/"
-                className="mt-5 inline-flex items-center gap-2 rounded-md bg-emerald-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400"
+                className="mt-5 inline-flex items-center gap-2 rounded-md bg-[#176F91] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#0B5E78]"
               >
                 Open public chat
+                <ExternalLink className="h-4 w-4" />
               </Link>
             </section>
           </div>
@@ -1082,10 +1066,14 @@ export default function AdminPage() {
 
   if (loading) {
     return (
-      <main className="grid min-h-screen place-items-center bg-slate-950 text-white">
-        <div className="flex items-center gap-3 rounded-lg border border-white/10 bg-white/[0.04] px-5 py-4">
-          <Icon name="activity" className="h-5 w-5 animate-pulse text-emerald-300" />
-          <span className="text-sm font-medium">Loading admin console...</span>
+      <main className="grid min-h-screen place-items-center bg-[#0B5E78] text-white">
+        <div className="flex items-center gap-4 rounded-lg border border-white/15 bg-white/[0.06] px-5 py-4">
+          <BrandLogo className="h-10 w-10 rounded-md border border-white/20" priority />
+          <div>
+            <span className="block text-sm font-medium">Loading administration</span>
+            <span className="mt-1 block text-xs text-[#B9DCE9]">Checking your secure session</span>
+          </div>
+          <Icon name="activity" className="ml-2 h-5 w-5 animate-pulse text-[#F5C078]" />
         </div>
       </main>
     );

@@ -1,68 +1,55 @@
 "use client";
 
+import {
+  Archive,
+  ArrowUp,
+  CalendarDays,
+  FileText,
+  Handshake,
+  Images,
+  Landmark,
+  Lightbulb,
+  LoaderCircle,
+  MapPin,
+  MessageCircleQuestion,
+  RotateCcw,
+  Sparkles,
+  Wifi,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import BrandLogo from "./components/brand-logo";
 
 const suggestedQuestions = [
-  "How should I prepare for the conference across the 4 days?",
-  "Which sessions are relevant to finance and investment?",
-  "Show me the official photos from REC24",
-  "Can I download the REC25 conference report?",
-  "What happens on Day 3?",
+  {
+    question: "How should I prepare for the conference across the 4 days?",
+    icon: CalendarDays,
+  },
+  {
+    question: "Which sessions are relevant to finance and investment?",
+    icon: Landmark,
+  },
+  {
+    question: "What happens on Day 3?",
+    icon: MessageCircleQuestion,
+  },
+  {
+    question: "Show me the official photos from REC24",
+    icon: Images,
+  },
+  {
+    question: "Can I download the REC25 conference report?",
+    icon: FileText,
+  },
 ];
 
 const capabilityItems = [
-  "Programme sessions",
-  "Venue and halls",
-  "Sponsors and partners",
-  "Practical preparation",
-  "Previous editions",
-  "Media and reports",
+  { label: "Programme sessions", icon: CalendarDays },
+  { label: "Venue and halls", icon: MapPin },
+  { label: "Sponsors and partners", icon: Handshake },
+  { label: "Practical preparation", icon: Lightbulb },
+  { label: "Previous editions", icon: Archive },
+  { label: "Media and reports", icon: FileText },
 ];
-
-function Icon({ name, className = "" }) {
-  const props = {
-    className,
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: "1.8",
-    strokeLinecap: "round",
-    strokeLinejoin: "round",
-    "aria-hidden": true,
-  };
-  const paths = {
-    send: (
-      <>
-        <path d="m4 11.5 15-7-7 15-2.5-6L4 11.5Z" />
-        <path d="m19 4.5-9.5 9" />
-      </>
-    ),
-    spark: (
-      <>
-        <path d="m12 3 1.5 5L19 9.5 13.5 11 12 17l-1.5-6L5 9.5 10.5 8 12 3Z" />
-        <path d="M19 17v4" />
-        <path d="M17 19h4" />
-      </>
-    ),
-    calendar: (
-      <>
-        <rect x="4" y="5" width="16" height="15" rx="2" />
-        <path d="M8 3v4" />
-        <path d="M16 3v4" />
-        <path d="M4 10h16" />
-      </>
-    ),
-    map: (
-      <>
-        <path d="M9 18 4 20V6l5-2 6 2 5-2v14l-5 2-6-2Z" />
-        <path d="M9 4v14" />
-        <path d="M15 6v14" />
-      </>
-    ),
-  };
-
-  return <svg {...props}>{paths[name]}</svg>;
-}
 
 function parseStreamEvent(rawEvent) {
   const lines = rawEvent.split("\n");
@@ -166,7 +153,7 @@ function parseInlineMarkdown(text) {
 
     if (match[2]) {
       nodes.push(
-        <strong key={key} className="font-semibold text-slate-950">
+        <strong key={key} className="font-semibold text-[#14262D]">
           {match[2]}
         </strong>
       );
@@ -174,7 +161,7 @@ function parseInlineMarkdown(text) {
       nodes.push(
         <code
           key={key}
-          className="rounded bg-slate-100 px-1 py-0.5 text-[0.92em] text-slate-800"
+          className="rounded bg-[#EDF3F5] px-1 py-0.5 text-[0.92em] text-[#183B49]"
         >
           {match[3]}
         </code>
@@ -186,7 +173,7 @@ function parseInlineMarkdown(text) {
           href={match[5]}
           target={match[5].startsWith("http") ? "_blank" : undefined}
           rel={match[5].startsWith("http") ? "noreferrer" : undefined}
-          className="font-medium text-emerald-700 underline decoration-emerald-300 underline-offset-2"
+          className="font-medium text-[#176F91] underline decoration-[#7BC4DF] underline-offset-2 hover:text-[#0B5E78]"
         >
           {match[4]}
         </a>
@@ -199,7 +186,7 @@ function parseInlineMarkdown(text) {
           href={href}
           target="_blank"
           rel="noreferrer"
-          className="font-medium text-emerald-700 underline decoration-emerald-300 underline-offset-2"
+          className="font-medium text-[#176F91] underline decoration-[#7BC4DF] underline-offset-2 hover:text-[#0B5E78]"
         >
           {href}
         </a>
@@ -223,7 +210,7 @@ function MarkdownContent({ content }) {
   const blocks = parseMarkdownBlocks(content || "Thinking...");
 
   return (
-    <div className="space-y-3 break-words text-sm leading-7">
+    <div className="space-y-3 break-words text-[0.9375rem] leading-7 text-[#243B44]">
       {blocks.map((block, index) => {
         if (block.type === "heading") {
           const Heading = block.level === 1 ? "h3" : "h4";
@@ -231,7 +218,7 @@ function MarkdownContent({ content }) {
           return (
             <Heading
               key={`${block.type}-${index}`}
-              className="text-base font-semibold leading-6 tracking-normal text-slate-950"
+              className="text-base font-semibold leading-6 tracking-normal text-[#14262D]"
             >
               {parseInlineMarkdown(block.text)}
             </Heading>
@@ -269,30 +256,62 @@ function MarkdownContent({ content }) {
 
 function Message({ message }) {
   const isUser = message.role === "user";
+  const isWaiting = !isUser && !message.content && !message.error;
 
   return (
-    <article className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-[88%] rounded-lg px-4 py-3 shadow-sm sm:max-w-[78%] ${
-          isUser
-            ? "bg-slate-950 text-white"
-            : "border border-slate-200 bg-white text-slate-900"
-        }`}
-      >
-        <div className="mb-1 text-xs font-semibold uppercase tracking-wide opacity-70">
-          {isUser ? "You" : "REC Assistant"}
+    <article
+      className={`flex items-start gap-3 ${isUser ? "justify-end" : "justify-start"}`}
+    >
+      {!isUser && (
+        <BrandLogo className="mt-1 h-9 w-9 rounded-md border border-[#D5E0E4] shadow-sm" />
+      )}
+      <div className={`min-w-0 ${isUser ? "max-w-[86%] sm:max-w-[72%]" : "max-w-[calc(100%-3rem)] sm:max-w-[84%]"}`}>
+        <div
+          className={`rounded-lg px-4 py-3 ${
+            isUser
+              ? "bg-[#176F91] text-white shadow-sm"
+              : message.error
+                ? "border border-red-200 bg-red-50 text-red-800"
+                : "border border-[#D5E0E4] bg-white text-[#243B44] shadow-[0_1px_2px_rgba(20,38,45,0.04)]"
+          }`}
+        >
+          <div
+            className={`mb-1.5 text-[0.6875rem] font-semibold uppercase ${
+              isUser ? "text-white/75" : "text-[#617780]"
+            }`}
+          >
+            {isUser ? "You" : "REC Assistant"}
+          </div>
+          {isWaiting ? (
+            <div className="flex items-center gap-2 py-1 text-sm text-[#617780]" role="status">
+              <LoaderCircle className="h-4 w-4 animate-spin text-[#2E9ECC]" />
+              Preparing your answer
+            </div>
+          ) : isUser ? (
+            <p className="whitespace-pre-wrap break-words text-[0.9375rem] leading-7">
+              {message.content}
+            </p>
+          ) : (
+            <MarkdownContent content={message.content} />
+          )}
         </div>
-        {isUser ? (
-          <p className="whitespace-pre-wrap break-words text-sm leading-7">
-            {message.content || "Thinking..."}
-          </p>
-        ) : (
-          <MarkdownContent content={message.content} />
-        )}
-        {message.sources?.length > 0 && (
-          <p className="mt-3 border-t border-slate-200 pt-2 text-xs text-slate-500">
-            {message.sources.length} source{message.sources.length === 1 ? "" : "s"} used
-          </p>
+        {!isUser && message.sources?.length > 0 && (
+          <details className="group mt-2 text-xs text-[#617780]">
+            <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 rounded px-1 py-1 font-medium hover:text-[#176F91] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2E9ECC]">
+              <FileText className="h-3.5 w-3.5" />
+              {message.sources.length} source{message.sources.length === 1 ? "" : "s"} used
+            </summary>
+            <ul className="mt-1 space-y-1 border-l-2 border-[#D5E0E4] pl-3">
+              {message.sources.slice(0, 6).map((source, index) => (
+                <li key={`${source.source || source.sourceType || "source"}-${index}`}>
+                  {source.source || source.sourceType || `Conference source ${index + 1}`}
+                </li>
+              ))}
+              {message.sources.length > 6 && (
+                <li>And {message.sources.length - 6} more</li>
+              )}
+            </ul>
+          </details>
         )}
       </div>
     </article>
@@ -429,140 +448,183 @@ export default function Home() {
   }
 
   return (
-    <main className="h-dvh overflow-hidden bg-slate-100 text-slate-950">
-      <div className="mx-auto flex h-full min-h-0 max-w-7xl flex-col px-3 py-3 sm:px-6 sm:py-4 lg:px-8">
-        <header className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm sm:px-5 sm:py-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-md bg-emerald-400 text-slate-950">
-              <Icon name="spark" className="h-5 w-5" />
-            </div>
-            <div>
-              <h1 className="text-lg font-semibold tracking-normal">
+    <main className="flex h-dvh min-h-[640px] flex-col overflow-hidden bg-[#F4F7F8] text-[#14262D]">
+      <header className="shrink-0 border-b border-[#D5E0E4] bg-white">
+        <div className="mx-auto flex h-[72px] w-full max-w-[1600px] items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
+          <div className="flex min-w-0 items-center gap-3">
+            <BrandLogo
+              className="h-12 w-12 rounded-md border border-[#D5E0E4]"
+              priority
+            />
+            <div className="min-w-0">
+              <h1 className="truncate text-base font-semibold text-[#14262D] sm:text-lg">
                 REC26 & EXPO Assistant
               </h1>
-              <p className="hidden text-sm text-slate-500 sm:block">
-                Public guidance for REC26 and published previous editions
+              <p className="truncate text-xs text-[#617780] sm:text-sm">
+                Renewable Energy Conference & Expo
               </p>
             </div>
           </div>
-          <a
-            href="/admin"
-            className="inline-flex items-center justify-center rounded-md border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-          >
-            Admin
-          </a>
-        </header>
-
-        <section className="mt-3 grid min-h-0 flex-1 gap-4 sm:mt-4 lg:grid-cols-[320px_1fr]">
-          <aside className="hidden min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-slate-950 p-5 text-white shadow-sm lg:block">
+          <div className="flex shrink-0 items-center gap-2 border-l border-[#D5E0E4] pl-4">
+            <span className="relative flex h-2.5 w-2.5" aria-hidden="true">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
+            </span>
             <div>
-              <p className="text-sm font-medium text-emerald-300">Active event</p>
-              <h2 className="mt-2 text-2xl font-semibold leading-tight tracking-normal">
-                Renewable Energy Conference & Expo 2026
-              </h2>
+              <p className="text-xs font-semibold text-[#24404B]">Online</p>
+              <p className="hidden text-xs text-[#78909A] sm:block">REC26 guide</p>
             </div>
-            <div className="mt-6 space-y-3">
-              <div className="flex gap-3 rounded-md bg-white/[0.06] p-4">
-                <Icon name="calendar" className="mt-0.5 h-5 w-5 text-emerald-300" />
-                <div>
-                  <p className="text-sm font-semibold">19-22 October 2026</p>
-                  <p className="mt-1 text-xs leading-5 text-slate-400">
-                    Four days spanning policy, technology, implementation, and
-                    regional scale.
-                  </p>
-                </div>
-              </div>
-              <div className="flex gap-3 rounded-md bg-white/[0.06] p-4">
-                <Icon name="map" className="mt-0.5 h-5 w-5 text-emerald-300" />
-                <div>
-                  <p className="text-sm font-semibold">Kampala Serena Hotel</p>
-                  <p className="mt-1 text-xs leading-5 text-slate-400">
-                    Kampala, Uganda
-                  </p>
-                </div>
-              </div>
-            </div>
+          </div>
+        </div>
+      </header>
 
-            <div className="mt-6">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                Can help with
+      <div className="mx-auto grid min-h-0 w-full max-w-[1600px] flex-1 lg:grid-cols-[310px_minmax(0,1fr)]">
+        <aside className="hidden min-h-0 overflow-y-auto border-x border-[#0A536B] bg-[#0B5E78] text-white lg:flex lg:flex-col">
+          <div className="border-t-4 border-[#EFA74F] px-6 pb-6 pt-7">
+            <p className="text-xs font-semibold uppercase text-[#F5C078]">
+              Active event
+            </p>
+            <h2 className="mt-3 text-xl font-semibold leading-7">
+              Renewable Energy Conference & Expo 2026
+            </h2>
+            <p className="mt-3 text-sm leading-6 text-[#CBE7F2]">
+              From Systems to Scale: Powering Uganda&apos;s Green Economy
+            </p>
+          </div>
+
+          <div className="border-y border-white/15 px-6 py-5">
+            <div className="flex items-start gap-3">
+              <CalendarDays className="mt-0.5 h-5 w-5 shrink-0 text-[#F5C078]" />
+              <div>
+                <p className="text-sm font-semibold">19-22 October 2026</p>
+                <p className="mt-1 text-xs leading-5 text-[#B9DCE9]">
+                  Four programme days
+                </p>
+              </div>
+            </div>
+            <div className="mt-5 flex items-start gap-3">
+              <MapPin className="mt-0.5 h-5 w-5 shrink-0 text-[#F5C078]" />
+              <div>
+                <p className="text-sm font-semibold">Kampala Serena Hotel</p>
+                <p className="mt-1 text-xs leading-5 text-[#B9DCE9]">
+                  Kampala, Uganda
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex-1 px-6 py-6">
+            <p className="text-xs font-semibold uppercase text-[#9DCBDB]">
+              Conference guide
+            </p>
+            <ul className="mt-4 space-y-1">
+              {capabilityItems.map(({ label, icon: CapabilityIcon }) => (
+                <li key={label} className="flex items-center gap-3 py-2.5 text-sm text-[#E4F2F7]">
+                  <CapabilityIcon className="h-4 w-4 shrink-0 text-[#F5C078]" />
+                  {label}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="border-t border-white/15 px-6 py-5">
+            <div className="flex items-center gap-3">
+              <Wifi className="h-4 w-4 text-[#F5C078]" />
+              <p className="text-xs leading-5 text-[#B9DCE9]">
+                Answers use published REC data and approved visitor guidance.
               </p>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                {capabilityItems.map((item) => (
-                  <div
-                    key={item}
-                    className="rounded-md border border-white/10 px-3 py-2 text-xs text-slate-300"
-                  >
-                    {item}
+            </div>
+          </div>
+        </aside>
+
+        <section className="flex min-h-0 min-w-0 flex-col border-r border-[#D5E0E4] bg-white">
+          <div className="flex min-h-[68px] shrink-0 items-center justify-between gap-4 border-b border-[#D5E0E4] px-4 py-3 sm:px-6">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 shrink-0 text-[#EFA74F]" />
+                <h2 className="truncate text-sm font-semibold sm:text-base">
+                  Conference conversation
+                </h2>
+              </div>
+              <p className="mt-1 hidden text-xs text-[#617780] sm:block">
+                Current event guidance and the published REC archive
+              </p>
+            </div>
+            {messages.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setMessages([])}
+                title="Clear conversation"
+                aria-label="Clear conversation"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[#D5E0E4] text-[#617780] transition hover:border-[#93B7C5] hover:bg-[#EDF3F5] hover:text-[#176F91] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2E9ECC]"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+
+          <div
+            ref={transcriptRef}
+            aria-live="polite"
+            className="flex-1 space-y-5 overflow-y-auto bg-[#F7F9FA] px-4 py-5 sm:px-6 sm:py-7 lg:px-8"
+          >
+            {messages.length === 0 ? (
+              <div className="mx-auto flex min-h-full max-w-3xl items-center">
+                <div className="w-full py-3 sm:py-8">
+                  <div className="flex items-center gap-4">
+                    <BrandLogo className="h-16 w-16 rounded-lg border border-[#D5E0E4] shadow-sm" />
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-[#176F91]">
+                        Official conference assistant
+                      </p>
+                      <h3 className="mt-1 text-2xl font-semibold leading-8 text-[#14262D] sm:text-3xl">
+                        Plan your REC26 experience
+                      </h3>
+                    </div>
                   </div>
+                  <p className="mt-5 max-w-2xl text-sm leading-7 text-[#526B75] sm:text-base">
+                    Get precise programme details, compare sessions, prepare for
+                    each day, or explore sponsors and previous conference editions.
+                  </p>
+                  <div className="mt-6 grid gap-2 sm:grid-cols-2">
+                    {suggestedQuestions.map(
+                      ({ question: suggestedQuestion, icon: SuggestedIcon }) => (
+                        <button
+                          key={suggestedQuestion}
+                          type="button"
+                          onClick={(event) => askQuestion(event, suggestedQuestion)}
+                          className="group flex min-h-[68px] items-center gap-3 rounded-md border border-[#D5E0E4] bg-white px-4 py-3 text-left text-sm font-medium leading-5 text-[#29434D] shadow-[0_1px_2px_rgba(20,38,45,0.03)] transition hover:border-[#79B5CC] hover:bg-[#F1F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2E9ECC]"
+                        >
+                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[#E5F3F8] text-[#176F91] transition group-hover:bg-[#D6ECF4]">
+                            <SuggestedIcon className="h-4 w-4" />
+                          </span>
+                          <span>{suggestedQuestion}</span>
+                        </button>
+                      )
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="mx-auto w-full max-w-5xl space-y-5">
+                {messages.map((message) => (
+                  <Message key={message.id} message={message} />
                 ))}
               </div>
-            </div>
-          </aside>
+            )}
+          </div>
 
-          <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-            <div className="border-b border-slate-200 px-5 py-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <h2 className="text-base font-semibold">Conversation</h2>
-                  <p className="mt-1 text-sm text-slate-500">
-                    Ask about sessions, logistics, sponsors, previous editions,
-                    media, reports, and practical preparation.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setMessages([])}
-                  className="rounded-md border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
-                >
-                  Clear
-                </button>
-              </div>
-            </div>
-
-            <div
-              ref={transcriptRef}
-              className="flex-1 space-y-4 overflow-y-auto bg-slate-50 px-4 py-5 sm:px-6"
-            >
-              {messages.length === 0 ? (
-                <div className="grid min-h-full place-items-center">
-                  <div className="max-w-2xl text-center">
-                    <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-slate-950 text-white">
-                      <Icon name="spark" className="h-5 w-5" />
-                    </div>
-                    <h3 className="mt-5 text-2xl font-semibold tracking-normal">
-                      Start with the outcome you want
-                    </h3>
-                    <p className="mt-3 text-sm leading-7 text-slate-500">
-                      The assistant can answer direct conference facts and also
-                      give practical planning guidance when grounded in the
-                      published programme and conference archive.
-                    </p>
-                    <div className="mt-6 grid grid-cols-2 gap-2">
-                      {suggestedQuestions.map((item) => (
-                        <button
-                          key={item}
-                          type="button"
-                          onClick={(event) => askQuestion(event, item)}
-                          className="rounded-md border border-slate-200 bg-white px-4 py-3 text-left text-sm font-medium leading-6 text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
-                        >
-                          {item}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                messages.map((message) => <Message key={message.id} message={message} />)
-              )}
-            </div>
-
-            <form
-              onSubmit={askQuestion}
-              className="border-t border-slate-200 bg-white p-4"
-            >
-              <div className="flex flex-col gap-3 sm:flex-row">
+          <form
+            onSubmit={askQuestion}
+            className="shrink-0 border-t border-[#D5E0E4] bg-white px-4 py-3 sm:px-6 sm:py-4 lg:px-8"
+          >
+            <div className="mx-auto max-w-5xl">
+              <div className="flex items-end gap-2 rounded-lg border border-[#B9CBD2] bg-white p-2 shadow-[0_4px_18px_rgba(20,38,45,0.06)] transition focus-within:border-[#2E9ECC] focus-within:ring-2 focus-within:ring-[#D6ECF4]">
+                <label htmlFor="conference-question" className="sr-only">
+                  Ask the REC conference assistant
+                </label>
                 <textarea
+                  id="conference-question"
                   value={question}
                   onChange={(event) => setQuestion(event.target.value)}
                   onKeyDown={(event) => {
@@ -570,21 +632,30 @@ export default function Home() {
                       askQuestion(event);
                     }
                   }}
-                  placeholder="Ask about the conference..."
+                  maxLength={4000}
+                  placeholder="Ask about REC26 & EXPO..."
                   rows={2}
-                  className="min-h-14 flex-1 resize-none rounded-md border border-slate-300 px-4 py-3 text-sm leading-6 outline-none transition focus:border-slate-950 focus:ring-4 focus:ring-slate-200"
+                  className="max-h-36 min-h-12 flex-1 resize-none bg-transparent px-2 py-2 text-[0.9375rem] leading-6 text-[#14262D] outline-none placeholder:text-[#82969E]"
                 />
                 <button
                   type="submit"
                   disabled={loading || !question.trim()}
-                  className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400 sm:w-36"
+                  title="Send question"
+                  aria-label="Send question"
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-[#176F91] text-white transition hover:bg-[#0B5E78] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2E9ECC] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-[#AEC0C7]"
                 >
-                  <Icon name="send" className="h-4 w-4" />
-                  {loading ? "Sending" : "Ask"}
+                  {loading ? (
+                    <LoaderCircle className="h-5 w-5 animate-spin" />
+                  ) : (
+                    <ArrowUp className="h-5 w-5" />
+                  )}
                 </button>
               </div>
-            </form>
-          </section>
+              <p className="mt-2 text-center text-[0.6875rem] leading-4 text-[#78909A]">
+                Information is based on published REC records and may change as the programme is updated.
+              </p>
+            </div>
+          </form>
         </section>
       </div>
     </main>
