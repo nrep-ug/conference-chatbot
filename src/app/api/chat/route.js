@@ -1,5 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
+import {
+  buildConversationCacheKey,
+  buildHistoryAwareQuery,
+  getConversationalReply,
+  isHistoryDependentFollowUp,
+  sanitizeChatHistory,
+} from "@/lib/chat-conversation";
 import { logChatEvent } from "@/lib/chat-diagnostics";
 import { getEmbedding, askMistral, streamMistral } from "@/lib/ollama";
 import { qdrant, QDRANT_COLLECTION } from "@/lib/qdrant";
@@ -19,6 +26,15 @@ const MIN_SEARCH_SCORE = readFloat("RAG_MIN_SEARCH_SCORE", 0.52);
 const ANSWER_CACHE_TTL_MS = readInteger("ANSWER_CACHE_TTL_MS", 5 * 60 * 1000);
 const ANSWER_CACHE_MAX = readInteger("ANSWER_CACHE_MAX", 100);
 const MAX_QUESTION_CHARS = readInteger("CHAT_MAX_QUESTION_CHARS", 4000);
+const MAX_HISTORY_MESSAGES = readInteger("CHAT_HISTORY_MAX_MESSAGES", 8);
+const MAX_HISTORY_MESSAGE_CHARS = readInteger(
+  "CHAT_HISTORY_MAX_MESSAGE_CHARS",
+  1200
+);
+const MAX_HISTORY_TOTAL_CHARS = readInteger(
+  "CHAT_HISTORY_MAX_TOTAL_CHARS",
+  4800
+);
 const QDRANT_COMPLEMENT_ENABLED = readBoolean("QDRANT_COMPLEMENT_ENABLED", false);
 const QDRANT_COMPLEMENT_MODE = (process.env.QDRANT_COMPLEMENT_MODE || "append")
   .trim()
@@ -112,6 +128,17 @@ function normalizeQuestion(question) {
   return question.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function getConversationAnswer(question, history) {
+  const answer = getConversationalReply(question, history);
+  return answer ? { answer, sources: [] } : null;
+}
+
+function getAnswerCacheKey(question, history) {
+  return createHash("sha256")
+    .update(buildConversationCacheKey(question, history))
+    .digest("base64url");
+}
+
 function getAssistantScopeAnswer(question) {
   const normalized = normalizeQuestion(question);
   const hasConferenceTerms = CONFERENCE_TERMS.test(normalized);
@@ -127,39 +154,21 @@ function getAssistantScopeAnswer(question) {
   ) {
     return {
       answer: CHATBOT_HELP_ANSWER,
-      sources: [
-        {
-          source: "Conference chatbot scope",
-          sourceType: "assistant_scope",
-          score: 1,
-        },
-      ],
+      sources: [],
     };
   }
 
   if (!hasConferenceTerms && OFF_TOPIC_TERMS.test(normalized)) {
     return {
       answer: OUT_OF_SCOPE_ANSWER,
-      sources: [
-        {
-          source: "Conference chatbot scope",
-          sourceType: "assistant_scope",
-          score: 1,
-        },
-      ],
+      sources: [],
     };
   }
 
   if (!hasConferenceTerms && GENERAL_KNOWLEDGE_START.test(normalized)) {
     return {
       answer: OUT_OF_SCOPE_ANSWER,
-      sources: [
-        {
-          source: "Conference chatbot scope",
-          sourceType: "assistant_scope",
-          score: 1,
-        },
-      ],
+      sources: [],
     };
   }
 
@@ -171,21 +180,15 @@ function getAssistantScopeAnswer(question) {
   ) {
     return {
       answer: CHATBOT_HELP_ANSWER,
-      sources: [
-        {
-          source: "Conference chatbot scope",
-          sourceType: "assistant_scope",
-          score: 1,
-        },
-      ],
+      sources: [],
     };
   }
 
   return null;
 }
 
-function getCachedAnswer(question) {
-  const key = normalizeQuestion(question);
+function getCachedAnswer(question, history = []) {
+  const key = getAnswerCacheKey(question, history);
   const cached = answerCache.get(key);
 
   if (!cached) return null;
@@ -200,10 +203,10 @@ function getCachedAnswer(question) {
   return cached.payload;
 }
 
-function setCachedAnswer(question, payload) {
+function setCachedAnswer(question, payload, history = []) {
   if (ANSWER_CACHE_TTL_MS <= 0 || ANSWER_CACHE_MAX <= 0) return;
 
-  const key = normalizeQuestion(question);
+  const key = getAnswerCacheKey(question, history);
   answerCache.set(key, {
     createdAt: Date.now(),
     payload,
@@ -566,7 +569,14 @@ function appendComplementContext(directAnswer, qdrantContext) {
   ].join("\n");
 }
 
-async function complementDirectAnswer(question, directAnswer, signal, requestId, startedAt) {
+async function complementDirectAnswer(
+  question,
+  directAnswer,
+  history,
+  signal,
+  requestId,
+  startedAt
+) {
   if (!shouldComplementDirectAnswer(question, directAnswer)) {
     return null;
   }
@@ -588,6 +598,7 @@ async function complementDirectAnswer(question, directAnswer, signal, requestId,
       ? await askMistral({
           question,
           context: buildComplementContext(directAnswer, retrieved.context),
+          history,
           signal,
         })
       : appendComplementContext(directAnswer, retrieved.context);
@@ -618,9 +629,11 @@ async function complementDirectAnswer(question, directAnswer, signal, requestId,
   }
 }
 
-async function answerQuestion(question, signal, requestId) {
+async function answerQuestion(question, history, signal, requestId) {
   const startedAt = Date.now();
-  const cached = getCachedAnswer(question);
+  const historyDependent = isHistoryDependentFollowUp(question, history);
+  const retrievalQuestion = buildHistoryAwareQuery(question, history);
+  const cached = getCachedAnswer(question, history);
   if (cached) {
     logChatEvent("answer_cache_hit", {
       requestId,
@@ -630,10 +643,22 @@ async function answerQuestion(question, signal, requestId) {
     return { ...cached, cached: true };
   }
 
+  const conversationAnswer = getConversationAnswer(question, history);
+
+  if (conversationAnswer) {
+    setCachedAnswer(question, conversationAnswer, history);
+    logChatEvent("answer_conversation_turn", {
+      requestId,
+      durationMs: Date.now() - startedAt,
+      historyTurns: history.length,
+    });
+    return conversationAnswer;
+  }
+
   const scopeAnswer = getAssistantScopeAnswer(question);
 
   if (scopeAnswer) {
-    setCachedAnswer(question, scopeAnswer);
+    setCachedAnswer(question, scopeAnswer, history);
     logChatEvent("answer_scope_guard", {
       requestId,
       durationMs: Date.now() - startedAt,
@@ -641,19 +666,22 @@ async function answerQuestion(question, signal, requestId) {
     return scopeAnswer;
   }
 
-  const directAnswer = await getDirectRecAnswer(question, { signal });
+  const directAnswer = historyDependent
+    ? null
+    : await getDirectRecAnswer(question, { signal });
 
   if (directAnswer) {
     const complementedAnswer = await complementDirectAnswer(
       question,
       directAnswer,
+      history,
       signal,
       requestId,
       startedAt
     );
     const payload = complementedAnswer || directAnswer;
 
-    setCachedAnswer(question, payload);
+    setCachedAnswer(question, payload, history);
     logChatEvent("answer_direct_appwrite", {
       requestId,
       durationMs: Date.now() - startedAt,
@@ -663,13 +691,18 @@ async function answerQuestion(question, signal, requestId) {
     return payload;
   }
 
-  const fullRecContext = await retrieveFullRecContext(question, signal, requestId);
+  const fullRecContext = await retrieveFullRecContext(
+    retrievalQuestion,
+    signal,
+    requestId
+  );
 
   if (fullRecContext.confident) {
     const answerStartedAt = Date.now();
     const answer = await askMistral({
       question,
       context: fullRecContext.context,
+      history,
       signal,
     });
     const payload = {
@@ -677,7 +710,7 @@ async function answerQuestion(question, signal, requestId) {
       sources: fullRecContext.sources,
     };
 
-    setCachedAnswer(question, payload);
+    setCachedAnswer(question, payload, history);
     logChatEvent("answer_full_rec_context", {
       requestId,
       durationMs: Date.now() - startedAt,
@@ -688,13 +721,17 @@ async function answerQuestion(question, signal, requestId) {
     return payload;
   }
 
-  const fullQdrantContext = await retrieveFullQdrantContext(question, requestId);
+  const fullQdrantContext = await retrieveFullQdrantContext(
+    retrievalQuestion,
+    requestId
+  );
 
   if (fullQdrantContext.confident) {
     const answerStartedAt = Date.now();
     const answer = await askMistral({
       question,
       context: fullQdrantContext.context,
+      history,
       signal,
     });
     const payload = {
@@ -702,7 +739,7 @@ async function answerQuestion(question, signal, requestId) {
       sources: fullQdrantContext.sources,
     };
 
-    setCachedAnswer(question, payload);
+    setCachedAnswer(question, payload, history);
     logChatEvent("answer_full_qdrant_context", {
       requestId,
       durationMs: Date.now() - startedAt,
@@ -716,6 +753,7 @@ async function answerQuestion(question, signal, requestId) {
   const plannedContext = await retrievePlannedRecContext(question, {
     signal,
     requestId,
+    history,
   });
 
   if (plannedContext.confident) {
@@ -723,11 +761,12 @@ async function answerQuestion(question, signal, requestId) {
     const answer = await askMistral({
       question,
       context: plannedContext.context,
+      history,
       signal,
     });
     const payload = { answer, sources: plannedContext.sources };
 
-    setCachedAnswer(question, payload);
+    setCachedAnswer(question, payload, history);
     logChatEvent("answer_planner_context", {
       requestId,
       durationMs: Date.now() - startedAt,
@@ -738,14 +777,17 @@ async function answerQuestion(question, signal, requestId) {
     return payload;
   }
 
-  const { context, sources, confident } = await retrieveContext(question, signal);
+  const { context, sources, confident } = await retrieveContext(
+    retrievalQuestion,
+    signal
+  );
 
   if (!confident) {
     const payload = {
       answer: OUT_OF_SCOPE_ANSWER,
       sources: [],
     };
-    setCachedAnswer(question, payload);
+    setCachedAnswer(question, payload, history);
     logChatEvent("answer_out_of_scope_or_low_rag_score", {
       requestId,
       durationMs: Date.now() - startedAt,
@@ -757,11 +799,12 @@ async function answerQuestion(question, signal, requestId) {
   const answer = await askMistral({
     question,
     context,
+    history,
     signal,
   });
   const payload = { answer, sources };
 
-  setCachedAnswer(question, payload);
+  setCachedAnswer(question, payload, history);
   logChatEvent("answer_qdrant_context", {
     requestId,
     durationMs: Date.now() - startedAt,
@@ -799,8 +842,10 @@ function getClientErrorMessage(error) {
   return "The chatbot failed to process the question.";
 }
 
-function streamAnswer(question, signal, requestId) {
+function streamAnswer(question, history, signal, requestId) {
   const encoder = new TextEncoder();
+  const historyDependent = isHistoryDependentFollowUp(question, history);
+  const retrievalQuestion = buildHistoryAwareQuery(question, history);
 
   return new Response(
     new ReadableStream({
@@ -808,7 +853,7 @@ function streamAnswer(question, signal, requestId) {
         const startedAt = Date.now();
 
         try {
-          const cached = getCachedAnswer(question);
+          const cached = getCachedAnswer(question, history);
 
           if (cached) {
             writeEvent(controller, encoder, "sources", cached.sources);
@@ -823,10 +868,36 @@ function streamAnswer(question, signal, requestId) {
             return;
           }
 
+          const conversationAnswer = getConversationAnswer(question, history);
+
+          if (conversationAnswer) {
+            setCachedAnswer(question, conversationAnswer, history);
+            writeEvent(
+              controller,
+              encoder,
+              "sources",
+              conversationAnswer.sources
+            );
+            writeEvent(
+              controller,
+              encoder,
+              "token",
+              conversationAnswer.answer
+            );
+            writeEvent(controller, encoder, "done", { cached: false });
+            logChatEvent("stream_conversation_turn", {
+              requestId,
+              durationMs: Date.now() - startedAt,
+              historyTurns: history.length,
+            });
+            controller.close();
+            return;
+          }
+
           const scopeAnswer = getAssistantScopeAnswer(question);
 
           if (scopeAnswer) {
-            setCachedAnswer(question, scopeAnswer);
+            setCachedAnswer(question, scopeAnswer, history);
             writeEvent(controller, encoder, "sources", scopeAnswer.sources);
             writeEvent(controller, encoder, "token", scopeAnswer.answer);
             writeEvent(controller, encoder, "done", { cached: false });
@@ -838,19 +909,22 @@ function streamAnswer(question, signal, requestId) {
             return;
           }
 
-          const directAnswer = await getDirectRecAnswer(question, { signal });
+          const directAnswer = historyDependent
+            ? null
+            : await getDirectRecAnswer(question, { signal });
 
           if (directAnswer) {
             const complementedAnswer = await complementDirectAnswer(
               question,
               directAnswer,
+              history,
               signal,
               requestId,
               startedAt
             );
             const payload = complementedAnswer || directAnswer;
 
-            setCachedAnswer(question, payload);
+            setCachedAnswer(question, payload, history);
             writeEvent(controller, encoder, "sources", payload.sources);
             writeEvent(controller, encoder, "token", payload.answer);
             writeEvent(controller, encoder, "done", { cached: false });
@@ -865,7 +939,7 @@ function streamAnswer(question, signal, requestId) {
           }
 
           const fullRecContext = await retrieveFullRecContext(
-            question,
+            retrievalQuestion,
             signal,
             requestId
           );
@@ -877,15 +951,20 @@ function streamAnswer(question, signal, requestId) {
             const answer = await streamMistral({
               question,
               context: fullRecContext.context,
+              history,
               signal,
               onToken: (token) =>
                 writeEvent(controller, encoder, "token", token),
             });
 
-            setCachedAnswer(question, {
-              answer,
-              sources: fullRecContext.sources,
-            });
+            setCachedAnswer(
+              question,
+              {
+                answer,
+                sources: fullRecContext.sources,
+              },
+              history
+            );
             writeEvent(controller, encoder, "done", { cached: false });
             logChatEvent("stream_full_rec_context", {
               requestId,
@@ -899,7 +978,7 @@ function streamAnswer(question, signal, requestId) {
           }
 
           const fullQdrantContext = await retrieveFullQdrantContext(
-            question,
+            retrievalQuestion,
             requestId
           );
 
@@ -910,15 +989,20 @@ function streamAnswer(question, signal, requestId) {
             const answer = await streamMistral({
               question,
               context: fullQdrantContext.context,
+              history,
               signal,
               onToken: (token) =>
                 writeEvent(controller, encoder, "token", token),
             });
 
-            setCachedAnswer(question, {
-              answer,
-              sources: fullQdrantContext.sources,
-            });
+            setCachedAnswer(
+              question,
+              {
+                answer,
+                sources: fullQdrantContext.sources,
+              },
+              history
+            );
             writeEvent(controller, encoder, "done", { cached: false });
             logChatEvent("stream_full_qdrant_context", {
               requestId,
@@ -934,6 +1018,7 @@ function streamAnswer(question, signal, requestId) {
           const plannedContext = await retrievePlannedRecContext(question, {
             signal,
             requestId,
+            history,
           });
 
           if (plannedContext.confident) {
@@ -943,15 +1028,20 @@ function streamAnswer(question, signal, requestId) {
             const answer = await streamMistral({
               question,
               context: plannedContext.context,
+              history,
               signal,
               onToken: (token) =>
                 writeEvent(controller, encoder, "token", token),
             });
 
-            setCachedAnswer(question, {
-              answer,
-              sources: plannedContext.sources,
-            });
+            setCachedAnswer(
+              question,
+              {
+                answer,
+                sources: plannedContext.sources,
+              },
+              history
+            );
             writeEvent(controller, encoder, "done", { cached: false });
             logChatEvent("stream_planner_context", {
               requestId,
@@ -965,7 +1055,7 @@ function streamAnswer(question, signal, requestId) {
           }
 
           const { context, sources, confident } = await retrieveContext(
-            question,
+            retrievalQuestion,
             signal
           );
 
@@ -974,7 +1064,7 @@ function streamAnswer(question, signal, requestId) {
               answer: OUT_OF_SCOPE_ANSWER,
               sources: [],
             };
-            setCachedAnswer(question, payload);
+            setCachedAnswer(question, payload, history);
             writeEvent(controller, encoder, "sources", payload.sources);
             writeEvent(controller, encoder, "token", payload.answer);
             writeEvent(controller, encoder, "done", { cached: false });
@@ -992,11 +1082,12 @@ function streamAnswer(question, signal, requestId) {
           const answer = await streamMistral({
             question,
             context,
+            history,
             signal,
             onToken: (token) => writeEvent(controller, encoder, "token", token),
           });
 
-          setCachedAnswer(question, { answer, sources });
+          setCachedAnswer(question, { answer, sources }, history);
           writeEvent(controller, encoder, "done", { cached: false });
           logChatEvent("stream_qdrant_context", {
             requestId,
@@ -1048,6 +1139,11 @@ export async function POST(request) {
     }
 
     const normalizedQuestion = question.trim();
+    const history = sanitizeChatHistory(body?.history, {
+      maxMessages: MAX_HISTORY_MESSAGES,
+      maxMessageChars: MAX_HISTORY_MESSAGE_CHARS,
+      maxTotalChars: MAX_HISTORY_TOTAL_CHARS,
+    });
 
     if (normalizedQuestion.length > MAX_QUESTION_CHARS) {
       return Response.json(
@@ -1062,14 +1158,21 @@ export async function POST(request) {
       requestId,
       stream,
       question: summarizeQuestion(normalizedQuestion),
+      historyTurns: history.length,
     });
 
     if (stream) {
-      return streamAnswer(normalizedQuestion, request.signal, requestId);
+      return streamAnswer(
+        normalizedQuestion,
+        history,
+        request.signal,
+        requestId
+      );
     }
 
     const response = await answerQuestion(
       normalizedQuestion,
+      history,
       request.signal,
       requestId
     );

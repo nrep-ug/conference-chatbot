@@ -17,6 +17,7 @@ import {
   Wifi,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { sanitizeChatHistory } from "@/lib/chat-conversation";
 import BrandLogo from "./components/brand-logo";
 
 const suggestedQuestions = [
@@ -342,6 +343,9 @@ export default function Home() {
     const userQuestion = (presetQuestion || question).trim();
     if (!userQuestion || loading) return;
 
+    const history = sanitizeChatHistory(
+      messages.filter((message) => message.error !== true)
+    );
     const assistantMessageId = crypto.randomUUID();
     setQuestion("");
     setLoading(true);
@@ -364,7 +368,11 @@ export default function Home() {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
         },
-        body: JSON.stringify({ question: userQuestion, stream: true }),
+        body: JSON.stringify({
+          question: userQuestion,
+          history,
+          stream: true,
+        }),
       });
 
       if (!response.ok) {

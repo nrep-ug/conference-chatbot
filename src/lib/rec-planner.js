@@ -581,7 +581,7 @@ function summarizePlan(plan) {
 
 export async function retrievePlannedRecContext(
   question,
-  { signal, requestId } = {}
+  { signal, requestId, history = [] } = {}
 ) {
   if (!PLANNER_ENABLED) {
     logChatEvent("planner_disabled", { requestId });
@@ -592,7 +592,7 @@ export async function retrievePlannedRecContext(
 
   try {
     const schema = getPlannerSchemaPrompt().slice(0, MAX_SCHEMA_CHARS);
-    const rawPlanText = await askPlanner({ question, schema, signal });
+    const rawPlanText = await askPlanner({ question, schema, history, signal });
     const rawPlan = extractJsonObject(rawPlanText);
     const plan = sanitizePlan(rawPlan);
 
