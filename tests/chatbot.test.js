@@ -723,6 +723,14 @@ test("answers explicitly scoped historical conference questions", async () => {
     "Tell me about the previous conferences",
     { snapshot }
   );
+  const editionHistory = await getDirectRecAnswer(
+    "Tell me more about the previous conference editions?",
+    { snapshot }
+  );
+  const latestPrevious = await getDirectRecAnswer(
+    "Tell me more about the previous conference",
+    { snapshot }
+  );
   const theme = await getDirectRecAnswer("What was the theme of REC25?", {
     snapshot,
   });
@@ -743,6 +751,15 @@ test("answers explicitly scoped historical conference questions", async () => {
 
   assert.match(history.answer, /REC25/);
   assert.match(history.answer, /REC24/);
+  assert.match(editionHistory.answer, /previous REC editions available/i);
+  assert.match(editionHistory.answer, /REC25/);
+  assert.match(editionHistory.answer, /REC24/);
+  assert.doesNotMatch(editionHistory.answer, /REC26/);
+  assert.match(editionHistory.answer, /Archive coverage/);
+  assert.match(editionHistory.answer, /\[REC25 Photos\]\(https:\/\/example\.org\/rec25-photos\)/);
+  assert.equal(editionHistory.retrievalPolicy?.qdrantComplement, false);
+  assert.match(latestPrevious.answer, /REC25/);
+  assert.doesNotMatch(latestPrevious.answer, /REC24/);
   assert.match(theme.answer, /Transforming Energy Systems/);
   assert.doesNotMatch(theme.answer, /From Systems to Scale/);
   assert.match(sessions.answer, /REC25 Green Finance Forum/);
@@ -754,7 +771,7 @@ test("answers explicitly scoped historical conference questions", async () => {
   );
   assert.match(comparison.answer, /REC25/);
   assert.match(comparison.answer, /REC26/);
-  assert.match(comparison.answer, /Published sessions/);
+  assert.match(comparison.answer, /Archive coverage/);
 });
 
 test("synthesizes theme evolution across editions without a model call", async () => {

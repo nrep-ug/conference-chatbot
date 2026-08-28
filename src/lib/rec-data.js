@@ -2626,7 +2626,17 @@ function selectConferenceBundles(normalized, snapshot) {
     .slice(1)
     .sort((left, right) => conferenceYear(right) - conferenceYear(left));
 
-  if (/\b(previous|last|most recent prior) conference\b/.test(normalized)) {
+  const asksForMultiplePastEditions =
+    /\b(previous|past|historical|earlier|prior)\s+(?:conference\s+)?(?:editions|conferences)\b/.test(
+      normalized
+    );
+
+  if (
+    !asksForMultiplePastEditions &&
+    /\b(previous|last|most recent prior)\s+(?:conference|edition)\b/.test(
+      normalized
+    )
+  ) {
     return includesCurrent ? [bundles[0], ...past.slice(0, 1)] : past.slice(0, 1);
   }
 
@@ -2885,6 +2895,46 @@ function formatEditionReports(bundle, requestedTypes = []) {
     .join("\n\n");
 }
 
+function formatArchiveCount(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function formatEditionArchiveCoverage(bundle) {
+  const sessions = (bundle.sessions || []).length;
+  const mediaItems = (bundle.mediaItems || []).length;
+  const reports = (bundle.reports || []).length;
+
+  return `**Archive coverage:** ${formatArchiveCount(
+    sessions,
+    "session record"
+  )}, ${formatArchiveCount(mediaItems, "media item")}, and ${formatArchiveCount(
+    reports,
+    "report"
+  )} in the published archive.`;
+}
+
+function formatEditionArchiveMaterials(bundle) {
+  const materials = [
+    ...(bundle.mediaItems || []).map((item) => {
+      const url = item.externalUrl || item.videoUrl || item.thumbnailUrl;
+      const title = item.title || "Conference media";
+      return `${url ? `[${title}](${url})` : `**${title}**`} (media)`;
+    }),
+    ...(bundle.reports || []).map((report) => {
+      const title = report.title || "Conference report";
+      return `${
+        report.reportUrl ? `[${title}](${report.reportUrl})` : `**${title}**`
+      } (report)`;
+    }),
+  ];
+
+  return materials.length > 0 ? markdownList(materials) : "";
+}
+
+const STRUCTURED_EDITION_RETRIEVAL_POLICY = Object.freeze({
+  qdrantComplement: false,
+});
+
 function answerHistoricalThemeEvolution(normalized, snapshot) {
   const bundles = getConferenceBundles(snapshot)
     .filter((bundle) => Number.isFinite(conferenceYear(bundle)))
@@ -2969,6 +3019,7 @@ function answerHistoricalThemeEvolution(normalized, snapshot) {
   return {
     answer: joinMarkdownSections(sections),
     sources: uniqueSources(sources),
+    retrievalPolicy: STRUCTURED_EDITION_RETRIEVAL_POLICY,
   };
 }
 
@@ -2989,6 +3040,7 @@ function answerConferenceEditions(normalized, snapshot) {
           snapshot.conference.title
         ),
       ],
+      retrievalPolicy: STRUCTURED_EDITION_RETRIEVAL_POLICY,
     };
   }
 
@@ -3088,9 +3140,11 @@ function answerConferenceEditions(normalized, snapshot) {
       );
     }
     if (!hasFocusedRequest) {
-      facts.push(`**Published sessions:** ${(bundle.sessions || []).length}`);
-      facts.push(`**Published media items:** ${(bundle.mediaItems || []).length}`);
-      facts.push(`**Published reports:** ${(bundle.reports || []).length}`);
+      facts.push(formatEditionArchiveCoverage(bundle));
+      const archiveMaterials = formatEditionArchiveMaterials(bundle);
+      if (archiveMaterials) {
+        facts.push(`**Available archive material**\n${archiveMaterials}`);
+      }
     }
     if (asksSessions && bundleMatchesIntentScope(bundle, sessionScope)) {
       facts.push(
@@ -3184,13 +3238,20 @@ function answerConferenceEditions(normalized, snapshot) {
     )}`;
   });
 
-  const introduction = selected.length > 1
-    ? "Here is the published information for the requested REC editions."
-    : "Here is the published information for that REC edition.";
+  const historicalCollection =
+    selected.length > 1 &&
+    selected.every((bundle) => bundle.conference.isActive !== true) &&
+    extractRequestedConferenceYears(normalized).size === 0;
+  const introduction = historicalCollection
+    ? "Here are the previous REC editions available in the published archive, newest first."
+    : selected.length > 1
+      ? "Here is the published information for the requested REC editions."
+      : "Here is the published information for that REC edition.";
 
   return {
     answer: joinMarkdownSections([introduction, ...sections]),
     sources: uniqueSources(sources),
+    retrievalPolicy: STRUCTURED_EDITION_RETRIEVAL_POLICY,
   };
 }
 

@@ -490,6 +490,7 @@ function mergeSources(...sourceGroups) {
 
 function shouldComplementDirectAnswer(question, directAnswer) {
   if (!QDRANT_COMPLEMENT_ENABLED) return false;
+  if (directAnswer?.retrievalPolicy?.qdrantComplement === false) return false;
 
   const normalized = normalizeQuestion(question);
   const sourceTypes = new Set(
