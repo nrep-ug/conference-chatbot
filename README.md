@@ -180,7 +180,7 @@ It provides:
 
 Runtime account data is stored in `data/admin/admin-users.json`, which is ignored by git. The tracked seed file is `data/admin/admin-users.example.json`.
 
-Admin-managed public visitor facts are stored in `data/admin/conference-knowledge.json`, which is also ignored by git. Its tracked seed is `data/admin/conference-knowledge.example.json`. Entries are always bound server-side to the active conference. Only entries marked **Published** are added to chatbot context and Qdrant. Store only public guest information here; do not add staff networks, internal systems, or private credentials.
+Admin-managed public visitor facts are stored in `data/admin/conference-knowledge.json`, which is also ignored by git. Its tracked seed is `data/admin/conference-knowledge.example.json`. Entries are always bound server-side to the active conference. Incomplete entries can be saved as drafts, while publishing requires a valid category, public topic, public answer, and at least one matching keyword. Only valid entries marked **Published** are added to chatbot context and Qdrant. Store only public guest information here; do not add staff networks, internal systems, or private credentials.
 
 Before first production use:
 

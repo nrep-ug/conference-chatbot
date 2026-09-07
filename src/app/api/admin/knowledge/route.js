@@ -4,6 +4,9 @@ import {
   replaceConferenceOperationalInfo,
 } from "@/lib/conference-knowledge";
 import {
+  ConferenceKnowledgeValidationError,
+} from "@/lib/conference-knowledge-validation";
+import {
   getRecPublicSnapshot,
   invalidateRecPublicSnapshotCache,
 } from "@/lib/rec-data";
@@ -113,18 +116,24 @@ export async function PUT(request) {
       error: error.message,
     });
 
-    const validationError =
-      /needs|must be|at most|required|duplicate|currently being updated/i.test(
-        error.message || ""
-      );
+    const validationError = error instanceof ConferenceKnowledgeValidationError;
+    const updateConflict = /currently being updated/i.test(error.message || "");
+    const clientError =
+      validationError || updateConflict
+        ? error.message
+        : "Failed to save conference operational information.";
 
     return Response.json(
       {
-        error: validationError
-          ? error.message
-          : "Failed to save conference operational information.",
+        error: clientError,
+        ...(validationError
+          ? {
+              code: error.code,
+              issues: error.issues,
+            }
+          : {}),
       },
-      { status: validationError ? 400 : 500 }
+      { status: validationError ? 400 : updateConflict ? 409 : 500 }
     );
   }
 }

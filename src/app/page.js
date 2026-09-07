@@ -17,7 +17,11 @@ import {
   Wifi,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { sanitizeChatHistory } from "@/lib/chat-conversation";
+import {
+  DEFAULT_CHAT_QUESTION_LIMITS,
+  sanitizeChatHistory,
+  validateChatQuestion,
+} from "@/lib/chat-conversation";
 import BrandLogo from "./components/brand-logo";
 
 const suggestedQuestions = [
@@ -323,7 +327,9 @@ export default function Home() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [composerError, setComposerError] = useState("");
   const transcriptRef = useRef(null);
+  const requestInFlightRef = useRef(false);
 
   useEffect(() => {
     if (messages.length === 0) {
@@ -340,13 +346,22 @@ export default function Home() {
   async function askQuestion(event, presetQuestion) {
     event?.preventDefault();
 
-    const userQuestion = (presetQuestion || question).trim();
-    if (!userQuestion || loading) return;
+    if (loading || requestInFlightRef.current) return;
+
+    const validation = validateChatQuestion(presetQuestion || question);
+    if (!validation.valid) {
+      setComposerError(validation.error);
+      return;
+    }
+
+    const userQuestion = validation.question;
 
     const history = sanitizeChatHistory(
       messages.filter((message) => message.error !== true)
     );
     const assistantMessageId = crypto.randomUUID();
+    requestInFlightRef.current = true;
+    setComposerError("");
     setQuestion("");
     setLoading(true);
 
@@ -411,6 +426,7 @@ export default function Home() {
         { replace: true, error: true }
       );
     } finally {
+      requestInFlightRef.current = false;
       setLoading(false);
     }
   }
@@ -634,20 +650,38 @@ export default function Home() {
                 <textarea
                   id="conference-question"
                   value={question}
-                  onChange={(event) => setQuestion(event.target.value)}
+                  onChange={(event) => {
+                    setQuestion(event.target.value);
+                    if (composerError) setComposerError("");
+                  }}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
+                    if (
+                      event.key === "Enter" &&
+                      !event.shiftKey &&
+                      !event.nativeEvent.isComposing
+                    ) {
                       askQuestion(event);
                     }
                   }}
-                  maxLength={4000}
+                  minLength={DEFAULT_CHAT_QUESTION_LIMITS.minChars}
+                  maxLength={DEFAULT_CHAT_QUESTION_LIMITS.maxChars}
+                  aria-invalid={Boolean(composerError)}
+                  aria-describedby={
+                    composerError
+                      ? "conference-question-error"
+                      : "conference-question-guidance"
+                  }
                   placeholder="Ask about REC26 & EXPO..."
                   rows={2}
                   className="max-h-36 min-h-12 flex-1 resize-none bg-transparent px-2 py-2 text-[0.9375rem] leading-6 text-[#14262D] outline-none placeholder:text-[#82969E]"
                 />
                 <button
                   type="submit"
-                  disabled={loading || !question.trim()}
+                  disabled={
+                    loading ||
+                    question.trim().length <
+                      DEFAULT_CHAT_QUESTION_LIMITS.minChars
+                  }
                   title="Send question"
                   aria-label="Send question"
                   className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-[#176F91] text-white transition hover:bg-[#0B5E78] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2E9ECC] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-[#AEC0C7]"
@@ -659,9 +693,23 @@ export default function Home() {
                   )}
                 </button>
               </div>
-              <p className="mt-2 text-center text-[0.6875rem] leading-4 text-[#78909A]">
-                Information is based on published REC records and may change as the programme is updated.
-              </p>
+              {composerError ? (
+                <p
+                  id="conference-question-error"
+                  role="alert"
+                  className="mt-2 text-center text-xs font-medium leading-4 text-red-700"
+                >
+                  {composerError}
+                </p>
+              ) : (
+                <p
+                  id="conference-question-guidance"
+                  className="mt-2 text-center text-[0.6875rem] leading-4 text-[#78909A]"
+                >
+                  Information is based on published REC records and may change as
+                  the programme is updated.
+                </p>
+              )}
             </div>
           </form>
         </section>

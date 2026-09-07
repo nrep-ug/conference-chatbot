@@ -4,9 +4,11 @@ import test from "node:test";
 import {
   buildConversationCacheKey,
   buildHistoryAwareQuery,
+  DEFAULT_CHAT_QUESTION_LIMITS,
   getConversationalReply,
   isHistoryDependentFollowUp,
   sanitizeChatHistory,
+  validateChatQuestion,
 } from "../src/lib/chat-conversation.js";
 import {
   buildAnswerMessages,
@@ -21,6 +23,22 @@ const greetingHistory = [
       "I can help with dates, venue details, programme sessions, and sponsors.",
   },
 ];
+
+test("uses one validation contract for public chat submissions", () => {
+  assert.deepEqual(validateChatQuestion(null), {
+    valid: false,
+    question: "",
+    error: "Please provide a valid question.",
+  });
+  assert.equal(validateChatQuestion(" x ").valid, false);
+  assert.equal(validateChatQuestion(" hi ").question, "hi");
+  assert.equal(
+    validateChatQuestion(
+      "x".repeat(DEFAULT_CHAT_QUESTION_LIMITS.maxChars + 1)
+    ).valid,
+    false
+  );
+});
 
 test("sanitizes and bounds client-provided conversation history", () => {
   const history = sanitizeChatHistory(

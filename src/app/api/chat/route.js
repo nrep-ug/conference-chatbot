@@ -6,6 +6,7 @@ import {
   getConversationalReply,
   isHistoryDependentFollowUp,
   sanitizeChatHistory,
+  validateChatQuestion,
 } from "@/lib/chat-conversation";
 import { logChatEvent } from "@/lib/chat-diagnostics";
 import { getEmbedding, askMistral, streamMistral } from "@/lib/ollama";
@@ -1128,31 +1129,24 @@ export async function POST(request) {
 
   try {
     const body = await request.json().catch(() => null);
-    const question = body?.question;
     const stream = body?.stream === true;
+    const questionValidation = validateChatQuestion(body?.question, {
+      maxChars: MAX_QUESTION_CHARS,
+    });
 
-    if (typeof question !== "string" || question.trim().length < 2) {
+    if (!questionValidation.valid) {
       return Response.json(
-        { error: "Please provide a valid question." },
+        { error: questionValidation.error },
         { status: 400 }
       );
     }
 
-    const normalizedQuestion = question.trim();
+    const normalizedQuestion = questionValidation.question;
     const history = sanitizeChatHistory(body?.history, {
       maxMessages: MAX_HISTORY_MESSAGES,
       maxMessageChars: MAX_HISTORY_MESSAGE_CHARS,
       maxTotalChars: MAX_HISTORY_TOTAL_CHARS,
     });
-
-    if (normalizedQuestion.length > MAX_QUESTION_CHARS) {
-      return Response.json(
-        {
-          error: `Please keep the question under ${MAX_QUESTION_CHARS} characters.`,
-        },
-        { status: 400 }
-      );
-    }
 
     logChatEvent("request_start", {
       requestId,

@@ -9,6 +9,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import {
+  assertValidConferenceKnowledgeItems,
+  CONFERENCE_KNOWLEDGE_CATEGORIES,
+  CONFERENCE_KNOWLEDGE_LIMITS,
+  isConferenceKnowledgeItemPublishable,
+  normalizeConferenceKnowledgeKeywords,
+} from "./conference-knowledge-validation.js";
 
 const DATA_DIR = path.join(process.cwd(), "data", "admin");
 const STORE_PATH = path.join(
@@ -20,18 +27,7 @@ const STORE_PATH = path.join(
 const EXAMPLE_PATH = path.join(DATA_DIR, "conference-knowledge.example.json");
 const LOCK_PATH = `${STORE_PATH}.lock`;
 const LOCK_STALE_MS = 30_000;
-const MAX_ITEMS_PER_CONFERENCE = 50;
-const MAX_KEYWORDS = 20;
-const CATEGORIES = new Set([
-  "venue",
-  "connectivity",
-  "transport",
-  "accessibility",
-  "catering",
-  "registration",
-  "safety",
-  "other",
-]);
+const CATEGORIES = new Set(CONFERENCE_KNOWLEDGE_CATEGORIES);
 
 function cleanText(value, maxLength) {
   return String(value || "")
@@ -41,26 +37,19 @@ function cleanText(value, maxLength) {
 }
 
 function normalizeKeywords(value) {
-  const values = Array.isArray(value)
-    ? value
-    : String(value || "").split(",");
-
-  return [
-    ...new Set(
-      values
-        .map((keyword) => cleanText(keyword, 60).toLowerCase())
-        .filter(Boolean)
-    ),
-  ].slice(0, MAX_KEYWORDS);
+  return normalizeConferenceKnowledgeKeywords(value)
+    .map((keyword) => cleanText(keyword, CONFERENCE_KNOWLEDGE_LIMITS.keyword))
+    .filter(Boolean)
+    .slice(0, CONFERENCE_KNOWLEDGE_LIMITS.keywords);
 }
 
 function normalizeStoredItem(item) {
   return {
-    id: cleanText(item?.id, 80) || randomUUID(),
-    conferenceId: cleanText(item?.conferenceId, 80),
+    id: cleanText(item?.id, CONFERENCE_KNOWLEDGE_LIMITS.id) || randomUUID(),
+    conferenceId: cleanText(item?.conferenceId, CONFERENCE_KNOWLEDGE_LIMITS.id),
     category: CATEGORIES.has(item?.category) ? item.category : "other",
-    title: cleanText(item?.title, 140),
-    answer: cleanText(item?.answer, 3000),
+    title: cleanText(item?.title, CONFERENCE_KNOWLEDGE_LIMITS.title),
+    answer: cleanText(item?.answer, CONFERENCE_KNOWLEDGE_LIMITS.answer),
     keywords: normalizeKeywords(item?.keywords),
     isPublished: item?.isPublished === true,
     createdAt: cleanText(item?.createdAt, 40),
@@ -167,7 +156,9 @@ export async function getConferenceOperationalInfo(
 
   return store.items
     .filter((item) => item.conferenceId === normalizedConferenceId)
-    .filter((item) => includeUnpublished || item.isPublished)
+    .filter(
+      (item) => includeUnpublished || isConferenceKnowledgeItemPublishable(item)
+    )
     .sort((left, right) => left.title.localeCompare(right.title, "en"));
 }
 
@@ -183,15 +174,7 @@ export async function replaceConferenceOperationalInfo(
     throw new Error("The active conference ID is required.");
   }
 
-  if (!Array.isArray(items)) {
-    throw new Error("Operational information must be an array.");
-  }
-
-  if (items.length > MAX_ITEMS_PER_CONFERENCE) {
-    throw new Error(
-      `A conference can have at most ${MAX_ITEMS_PER_CONFERENCE} operational entries.`
-    );
-  }
+  assertValidConferenceKnowledgeItems(items);
 
   return withStoreLock(async () => {
     const store = await readStore();
@@ -201,8 +184,8 @@ export async function replaceConferenceOperationalInfo(
         .map((item) => [item.id, item])
     );
     const now = new Date().toISOString();
-    const normalizedItems = items.map((item, index) => {
-      const suppliedId = cleanText(item?.id, 80);
+    const normalizedItems = items.map((item) => {
+      const suppliedId = cleanText(item?.id, CONFERENCE_KNOWLEDGE_LIMITS.id);
       const existing = existingItems.get(suppliedId);
       const normalized = normalizeStoredItem({
         ...item,
@@ -213,29 +196,8 @@ export async function replaceConferenceOperationalInfo(
         updatedBy: editor,
       });
 
-      if (!normalized.title) {
-        throw new Error(`Entry ${index + 1} needs a title.`);
-      }
-
-      if (!normalized.answer) {
-        throw new Error(`Entry ${index + 1} needs a public answer.`);
-      }
-
-      if (normalized.keywords.length === 0) {
-        throw new Error(`Entry ${index + 1} needs at least one keyword.`);
-      }
-
       return normalized;
     });
-
-    const duplicateTitles = new Set();
-    for (const item of normalizedItems) {
-      const key = item.title.toLowerCase();
-      if (duplicateTitles.has(key)) {
-        throw new Error(`Duplicate operational entry title: ${item.title}`);
-      }
-      duplicateTitles.add(key);
-    }
 
     const nextStore = {
       version: 1,

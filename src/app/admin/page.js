@@ -18,6 +18,13 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import {
+  CONFERENCE_KNOWLEDGE_LIMITS,
+  formatConferenceKnowledgeValidationError,
+  normalizeConferenceKnowledgeKeywords,
+  validateConferenceKnowledgeItemForPublishing,
+  validateConferenceKnowledgeItems,
+} from "@/lib/conference-knowledge-validation";
 import BrandLogo from "../components/brand-logo";
 
 const EMAIL_STATE = {
@@ -83,7 +90,9 @@ async function putJson(url, body) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(data.error || "The request failed.");
+    const error = new Error(data.error || "The request failed.");
+    error.details = data;
+    throw error;
   }
 
   return data;
@@ -198,6 +207,62 @@ function createKnowledgeItem() {
   };
 }
 
+function serializeKnowledgeItem(item) {
+  return {
+    id: item.id,
+    category: item.category,
+    title: item.title,
+    answer: item.answer,
+    keywords: normalizeConferenceKnowledgeKeywords(item.keywordsText),
+    isPublished: item.isPublished,
+  };
+}
+
+function serializeKnowledgeItems(items) {
+  return items.map(serializeKnowledgeItem);
+}
+
+function getClientFieldName(field) {
+  return field === "keywords" ? "keywordsText" : field;
+}
+
+function mapKnowledgeFieldErrors(issues, items) {
+  const errors = {};
+
+  for (const issue of issues || []) {
+    if (!Number.isInteger(issue.index) || !items[issue.index]) continue;
+
+    const clientId = items[issue.index].clientId;
+    const field = getClientFieldName(issue.field);
+    errors[clientId] ||= {};
+    errors[clientId][field] ||= issue.message;
+  }
+
+  return errors;
+}
+
+function focusFirstKnowledgeError(issues) {
+  const issue = (issues || []).find(
+    (candidate) =>
+      Number.isInteger(candidate.index) &&
+      ["category", "title", "answer", "keywords", "isPublished"].includes(
+        candidate.field
+      )
+  );
+  if (!issue) return;
+
+  const field = getClientFieldName(issue.field);
+  requestAnimationFrame(() => {
+    document.getElementById(`knowledge-${issue.index}-${field}`)?.focus();
+  });
+}
+
+function canPublishKnowledgeItem(item) {
+  return validateConferenceKnowledgeItemForPublishing(
+    serializeKnowledgeItem(item)
+  ).valid;
+}
+
 function KnowledgeEditor({ onStatusRefresh }) {
   const [conference, setConference] = useState(null);
   const [items, setItems] = useState([]);
@@ -205,6 +270,7 @@ function KnowledgeEditor({ onStatusRefresh }) {
   const [busyAction, setBusyAction] = useState("");
   const [notice, setNotice] = useState("");
   const [hasError, setHasError] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState({});
 
   useEffect(() => {
     let cancelled = false;
@@ -219,13 +285,21 @@ function KnowledgeEditor({ onStatusRefresh }) {
         if (cancelled) return;
 
         setConference(data.conference);
-        setItems(
-          (data.items || []).map((item) => ({
-            ...item,
-            clientId: item.id || crypto.randomUUID(),
-            keywordsText: (item.keywords || []).join(", "),
-          }))
+        const loadedItems = (data.items || []).map((item) => ({
+          ...item,
+          clientId: item.id || crypto.randomUUID(),
+          keywordsText: (item.keywords || []).join(", "),
+        }));
+        const validation = validateConferenceKnowledgeItems(
+          serializeKnowledgeItems(loadedItems)
         );
+
+        setItems(loadedItems);
+        setFieldErrors(mapKnowledgeFieldErrors(validation.issues, loadedItems));
+        if (!validation.valid) {
+          setNotice(formatConferenceKnowledgeValidationError(validation.issues));
+          setHasError(true);
+        }
       } catch (error) {
         if (!cancelled) {
           setNotice(error.message);
@@ -249,31 +323,88 @@ function KnowledgeEditor({ onStatusRefresh }) {
         item.clientId === clientId ? { ...item, [field]: value } : item
       )
     );
+    setFieldErrors((current) => {
+      if (!current[clientId]?.[field]) return current;
+
+      const next = { ...current };
+      const entryErrors = { ...next[clientId] };
+      delete entryErrors[field];
+
+      if (Object.keys(entryErrors).length === 0) delete next[clientId];
+      else next[clientId] = entryErrors;
+
+      return next;
+    });
+    setNotice("");
+    setHasError(false);
   }
 
   function removeItem(clientId) {
     setItems((current) => current.filter((item) => item.clientId !== clientId));
+    setFieldErrors((current) => {
+      if (!current[clientId]) return current;
+      const next = { ...current };
+      delete next[clientId];
+      return next;
+    });
+    setNotice("");
+    setHasError(false);
+  }
+
+  function togglePublished(clientId, shouldPublish) {
+    if (!shouldPublish) {
+      updateItem(clientId, "isPublished", false);
+      return;
+    }
+
+    const itemIndex = items.findIndex((item) => item.clientId === clientId);
+    if (itemIndex < 0) return;
+
+    const nextItems = items.map((item, index) =>
+      index === itemIndex ? { ...item, isPublished: true } : item
+    );
+    const validation = validateConferenceKnowledgeItems(
+      serializeKnowledgeItems(nextItems)
+    );
+    const itemIssues = validation.issues.filter(
+      (issue) => issue.index === itemIndex
+    );
+
+    if (itemIssues.length > 0) {
+      setFieldErrors((current) => ({
+        ...current,
+        ...mapKnowledgeFieldErrors(itemIssues, nextItems),
+      }));
+      setNotice(formatConferenceKnowledgeValidationError(itemIssues));
+      setHasError(true);
+      focusFirstKnowledgeError(itemIssues);
+      return;
+    }
+
+    updateItem(clientId, "isPublished", true);
   }
 
   async function saveKnowledge(rebuildQdrant) {
+    const payloadItems = serializeKnowledgeItems(items);
+    const validation = validateConferenceKnowledgeItems(payloadItems);
+
+    if (!validation.valid) {
+      setFieldErrors(mapKnowledgeFieldErrors(validation.issues, items));
+      setNotice(formatConferenceKnowledgeValidationError(validation.issues));
+      setHasError(true);
+      focusFirstKnowledgeError(validation.issues);
+      return;
+    }
+
     setBusyAction(rebuildQdrant ? "qdrant" : "save");
     setNotice("");
     setHasError(false);
+    setFieldErrors({});
 
     try {
       const result = await putJson("/api/admin/knowledge", {
         rebuildQdrant,
-        items: items.map((item) => ({
-          id: item.id,
-          category: item.category,
-          title: item.title,
-          answer: item.answer,
-          keywords: item.keywordsText
-            .split(",")
-            .map((keyword) => keyword.trim())
-            .filter(Boolean),
-          isPublished: item.isPublished,
-        })),
+        items: payloadItems,
       });
 
       setItems(
@@ -283,6 +414,7 @@ function KnowledgeEditor({ onStatusRefresh }) {
           keywordsText: (item.keywords || []).join(", "),
         }))
       );
+      setFieldErrors({});
       setNotice(
         rebuildQdrant
           ? `Saved ${result.items.length} entries and rebuilt Qdrant with ${result.qdrant?.points || 0} points.`
@@ -290,12 +422,23 @@ function KnowledgeEditor({ onStatusRefresh }) {
       );
       await onStatusRefresh();
     } catch (error) {
+      const serverIssues = Array.isArray(error.details?.issues)
+        ? error.details.issues
+        : [];
+      if (serverIssues.length > 0) {
+        setFieldErrors(mapKnowledgeFieldErrors(serverIssues, items));
+        focusFirstKnowledgeError(serverIssues);
+      }
       setNotice(error.message);
       setHasError(true);
     } finally {
       setBusyAction("");
     }
   }
+
+  const publishedCount = items.filter(
+    (item) => item.isPublished && canPublishKnowledgeItem(item)
+  ).length;
 
   return (
     <section
@@ -322,7 +465,16 @@ function KnowledgeEditor({ onStatusRefresh }) {
         <button
           type="button"
           onClick={() => setItems((current) => [...current, createKnowledgeItem()])}
-          disabled={loading || Boolean(busyAction)}
+          disabled={
+            loading ||
+            Boolean(busyAction) ||
+            items.length >= CONFERENCE_KNOWLEDGE_LIMITS.items
+          }
+          title={
+            items.length >= CONFERENCE_KNOWLEDGE_LIMITS.items
+              ? `A conference can have at most ${CONFERENCE_KNOWLEDGE_LIMITS.items} entries.`
+              : "Add a venue or visitor knowledge entry"
+          }
           className="inline-flex items-center justify-center gap-2 rounded-md border border-[#AFC4CC] px-4 py-2.5 text-sm font-semibold text-[#29434D] transition hover:border-[#79B5CC] hover:bg-[#F1F8FA] disabled:cursor-not-allowed disabled:text-[#9DAEB5]"
         >
           <Icon name="plus" className="h-4 w-4" />
@@ -347,11 +499,23 @@ function KnowledgeEditor({ onStatusRefresh }) {
                     Category
                   </span>
                   <select
+                    id={`knowledge-${index}-category`}
                     value={item.category}
                     onChange={(event) =>
                       updateItem(item.clientId, "category", event.target.value)
                     }
-                    className="mt-2 w-full rounded-md border border-[#B9CBD2] bg-white px-3 py-2.5 text-sm outline-none focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
+                    aria-invalid={Boolean(fieldErrors[item.clientId]?.category)}
+                    aria-describedby={
+                      fieldErrors[item.clientId]?.category
+                        ? `knowledge-${index}-category-error`
+                        : undefined
+                    }
+                    className={classNames(
+                      "mt-2 w-full rounded-md border bg-white px-3 py-2.5 text-sm outline-none focus:ring-4",
+                      fieldErrors[item.clientId]?.category
+                        ? "border-red-500 focus:border-red-600 focus:ring-red-100"
+                        : "border-[#B9CBD2] focus:border-[#2E9ECC] focus:ring-[#E5F3F8]"
+                    )}
                   >
                     {knowledgeCategories.map(([value, label]) => (
                       <option key={value} value={value}>
@@ -359,20 +523,49 @@ function KnowledgeEditor({ onStatusRefresh }) {
                       </option>
                     ))}
                   </select>
+                  {fieldErrors[item.clientId]?.category && (
+                    <span
+                      id={`knowledge-${index}-category-error`}
+                      className="mt-1.5 block text-xs font-medium text-red-700"
+                    >
+                      {fieldErrors[item.clientId].category}
+                    </span>
+                  )}
                 </label>
                 <label className="block">
                   <span className="text-xs font-semibold uppercase text-[#617780]">
                     Public topic
                   </span>
                   <input
+                    id={`knowledge-${index}-title`}
                     value={item.title}
                     onChange={(event) =>
                       updateItem(item.clientId, "title", event.target.value)
                     }
-                    maxLength={140}
+                    maxLength={CONFERENCE_KNOWLEDGE_LIMITS.title}
+                    required={item.isPublished}
+                    aria-invalid={Boolean(fieldErrors[item.clientId]?.title)}
+                    aria-describedby={
+                      fieldErrors[item.clientId]?.title
+                        ? `knowledge-${index}-title-error`
+                        : undefined
+                    }
                     placeholder="Guest Wi-Fi access"
-                    className="mt-2 w-full rounded-md border border-[#B9CBD2] px-3 py-2.5 text-sm outline-none focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
+                    className={classNames(
+                      "mt-2 w-full rounded-md border px-3 py-2.5 text-sm outline-none focus:ring-4",
+                      fieldErrors[item.clientId]?.title
+                        ? "border-red-500 focus:border-red-600 focus:ring-red-100"
+                        : "border-[#B9CBD2] focus:border-[#2E9ECC] focus:ring-[#E5F3F8]"
+                    )}
                   />
+                  {fieldErrors[item.clientId]?.title && (
+                    <span
+                      id={`knowledge-${index}-title-error`}
+                      className="mt-1.5 block text-xs font-medium text-red-700"
+                    >
+                      {fieldErrors[item.clientId].title}
+                    </span>
+                  )}
                 </label>
                 <button
                   type="button"
@@ -389,15 +582,36 @@ function KnowledgeEditor({ onStatusRefresh }) {
                   Public answer
                 </span>
                 <textarea
+                  id={`knowledge-${index}-answer`}
                   value={item.answer}
                   onChange={(event) =>
                     updateItem(item.clientId, "answer", event.target.value)
                   }
-                  maxLength={3000}
+                  maxLength={CONFERENCE_KNOWLEDGE_LIMITS.answer}
+                  required={item.isPublished}
+                  aria-invalid={Boolean(fieldErrors[item.clientId]?.answer)}
+                  aria-describedby={
+                    fieldErrors[item.clientId]?.answer
+                      ? `knowledge-${index}-answer-error`
+                      : undefined
+                  }
                   rows={3}
                   placeholder="Connect to the public guest network..."
-                  className="mt-2 w-full resize-y rounded-md border border-[#B9CBD2] px-3 py-2.5 text-sm leading-6 outline-none focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
+                  className={classNames(
+                    "mt-2 w-full resize-y rounded-md border px-3 py-2.5 text-sm leading-6 outline-none focus:ring-4",
+                    fieldErrors[item.clientId]?.answer
+                      ? "border-red-500 focus:border-red-600 focus:ring-red-100"
+                      : "border-[#B9CBD2] focus:border-[#2E9ECC] focus:ring-[#E5F3F8]"
+                  )}
                 />
+                {fieldErrors[item.clientId]?.answer && (
+                  <span
+                    id={`knowledge-${index}-answer-error`}
+                    className="mt-1.5 block text-xs font-medium text-red-700"
+                  >
+                    {fieldErrors[item.clientId].answer}
+                  </span>
+                )}
               </label>
               <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
                 <label className="block">
@@ -405,25 +619,66 @@ function KnowledgeEditor({ onStatusRefresh }) {
                     Matching keywords
                   </span>
                   <input
+                    id={`knowledge-${index}-keywordsText`}
                     value={item.keywordsText}
                     onChange={(event) =>
                       updateItem(item.clientId, "keywordsText", event.target.value)
                     }
-                    placeholder="wifi, internet, password, connectivity"
-                    className="mt-2 w-full rounded-md border border-[#B9CBD2] px-3 py-2.5 text-sm outline-none focus:border-[#2E9ECC] focus:ring-4 focus:ring-[#E5F3F8]"
-                  />
-                </label>
-                <label className="flex h-11 items-center gap-3 rounded-md border border-[#B9CBD2] px-4 text-sm font-semibold text-[#29434D]">
-                  <input
-                    type="checkbox"
-                    checked={item.isPublished}
-                    onChange={(event) =>
-                      updateItem(item.clientId, "isPublished", event.target.checked)
+                    required={item.isPublished}
+                    aria-invalid={Boolean(
+                      fieldErrors[item.clientId]?.keywordsText
+                    )}
+                    aria-describedby={
+                      fieldErrors[item.clientId]?.keywordsText
+                        ? `knowledge-${index}-keywordsText-error`
+                        : undefined
                     }
-                    className="h-4 w-4 accent-[#176F91]"
+                    placeholder="wifi, internet, password, connectivity"
+                    className={classNames(
+                      "mt-2 w-full rounded-md border px-3 py-2.5 text-sm outline-none focus:ring-4",
+                      fieldErrors[item.clientId]?.keywordsText
+                        ? "border-red-500 focus:border-red-600 focus:ring-red-100"
+                        : "border-[#B9CBD2] focus:border-[#2E9ECC] focus:ring-[#E5F3F8]"
+                    )}
                   />
-                  Published
+                  {fieldErrors[item.clientId]?.keywordsText && (
+                    <span
+                      id={`knowledge-${index}-keywordsText-error`}
+                      className="mt-1.5 block text-xs font-medium text-red-700"
+                    >
+                      {fieldErrors[item.clientId].keywordsText}
+                    </span>
+                  )}
                 </label>
+                <div>
+                  <label
+                    className={classNames(
+                      "flex h-11 items-center gap-3 rounded-md border px-4 text-sm font-semibold text-[#29434D]",
+                      fieldErrors[item.clientId]?.isPublished
+                        ? "border-red-500 bg-red-50"
+                        : "border-[#B9CBD2]"
+                    )}
+                  >
+                    <input
+                      id={`knowledge-${index}-isPublished`}
+                      type="checkbox"
+                      checked={item.isPublished}
+                      onChange={(event) =>
+                        togglePublished(item.clientId, event.target.checked)
+                      }
+                      aria-invalid={Boolean(
+                        fieldErrors[item.clientId]?.isPublished
+                      )}
+                      className="h-4 w-4 accent-[#176F91]"
+                    />
+                    Published
+                  </label>
+                  {!item.isPublished && !canPublishKnowledgeItem(item) && (
+                    <p className="mt-1.5 max-w-48 text-xs leading-5 text-[#617780]">
+                      Complete the topic, answer, and keywords to publish.
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
           ))}
@@ -432,14 +687,15 @@ function KnowledgeEditor({ onStatusRefresh }) {
 
       <div className="flex flex-col gap-3 border-t border-[#D5E0E4] bg-[#F7F9FA] p-5 sm:flex-row sm:items-center sm:justify-between">
         <div
+          role={hasError ? "alert" : "status"}
+          aria-live="polite"
           className={classNames(
             "text-sm",
             hasError ? "text-red-700" : "text-[#526B75]"
           )}
         >
-          {notice || `${items.filter((item) => item.isPublished).length} public entr${
-            items.filter((item) => item.isPublished).length === 1 ? "y" : "ies"
-          }`}
+          {notice ||
+            `${publishedCount} public entr${publishedCount === 1 ? "y" : "ies"}`}
         </div>
         <div className="flex flex-col gap-2 sm:flex-row">
           <button

@@ -6,6 +6,11 @@ export const DEFAULT_CHAT_HISTORY_LIMITS = Object.freeze({
   maxTotalChars: 4800,
 });
 
+export const DEFAULT_CHAT_QUESTION_LIMITS = Object.freeze({
+  minChars: 2,
+  maxChars: 4000,
+});
+
 function positiveInteger(value, fallback) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
@@ -25,6 +30,45 @@ function normalizedConversationText(value) {
     .replace(/[^a-z0-9'\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+export function validateChatQuestion(rawQuestion, options = {}) {
+  const minChars = positiveInteger(
+    options.minChars,
+    DEFAULT_CHAT_QUESTION_LIMITS.minChars
+  );
+  const maxChars = positiveInteger(
+    options.maxChars,
+    DEFAULT_CHAT_QUESTION_LIMITS.maxChars
+  );
+
+  if (typeof rawQuestion !== "string") {
+    return {
+      valid: false,
+      question: "",
+      error: "Please provide a valid question.",
+    };
+  }
+
+  const question = rawQuestion.replace(/\0/g, "").trim();
+
+  if (question.length < minChars) {
+    return {
+      valid: false,
+      question,
+      error: `Please enter at least ${minChars} characters.`,
+    };
+  }
+
+  if (question.length > maxChars) {
+    return {
+      valid: false,
+      question,
+      error: `Please keep the question under ${maxChars} characters.`,
+    };
+  }
+
+  return { valid: true, question, error: "" };
 }
 
 export function sanitizeChatHistory(rawHistory, options = {}) {
