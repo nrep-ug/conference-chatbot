@@ -402,6 +402,41 @@ npm run refresh:rec # Export public REC data, then rebuild Qdrant
 
 ## Production Deployment
 
+For updates to an existing `main`-branch PM2 installation, use the tracked script:
+
+```bash
+bash scripts/deploy-vps.sh --models
+```
+
+This replaces the server-local, git-ignored root `deploy.sh`; that local file is
+not overwritten. Use `--eval` for routine API checks instead, or omit both flags
+for deployment/readiness only. `--public-url https://your-host.example.org`
+overrides the default `https://chat.nrep.ug` readiness target.
+
+The script locks deployment with Linux `flock`, refuses tracked changes or
+non-ignored untracked files, validates configuration, fetches a fast-forward
+`origin/main` update, and stops PM2 **before** changing source, `node_modules`, or
+`.next`. It runs `npm ci`, tests and one production build, starts PM2 with
+`--update-env`, and verifies the local and public `/api/chat` routes before saving
+PM2 state. Readiness uses invalid input and checks the API validation contract;
+it does not invoke a model, warm answer caches, or accept a cached homepage as
+proof of API health. Local `PORT` comes from the same `.env.local` parser as PM2.
+
+This is a maintenance-window deployment with downtime, not an atomic release or
+zero-downtime rollback system. A failure after PM2 stops requires investigation;
+the script never resets/stashes local work or restarts an incomplete build. A
+failed optional evaluation exits with code **2** and leaves the healthy deployed
+app running. Slow answers still fail evaluation acceptance even when deployment
+succeeds. No second stop/build/reload sequence is needed.
+
+If the script reports a modified `package-lock.json`, inspect it with
+`git diff -- package-lock.json` and deliberately resolve the difference first.
+It will not discard the file for you. Review blocked dependency lifecycle
+scripts separately; do not blanket-approve them just to silence warnings.
+
+For initial setup (before the app exists in PM2), install the locked dependencies
+with `npm ci`, configure `.env.local`, then build and start as below.
+
 Build the app:
 
 ```bash
