@@ -53,3 +53,35 @@ test("reserves more context space for a longer conversation", () => {
   assert.ok(short > long);
   assert.ok(long >= 0);
 });
+
+test("reports model stage timings and counts without prompt or answer contents", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => Response.json({ done: true, done_reason: "stop", message: { content: "Published sponsors" },
+    load_duration: 1200000000, prompt_eval_duration: 5000000000, eval_duration: 2000000000, total_duration: 8300000000,
+    prompt_eval_count: 500, eval_count: 20 }));
+  let metrics;
+  await askMistral({ ...input, requestId: "test-id", onMetrics: (value) => { metrics = value; } });
+  assert.equal(metrics.success, true);
+  assert.equal(metrics.requestId, "test-id");
+  assert.equal(metrics.loadMs, 1200);
+  assert.equal(metrics.promptEvalMs, 5000);
+  assert.equal(metrics.generationMs, 2000);
+  assert.equal(metrics.generatedPerSecond, 10);
+  assert.equal(metrics.promptEvalCount, 500);
+  assert.equal(metrics.firstContentMs, null);
+  assert.doesNotMatch(JSON.stringify(metrics), /Who are|Published sponsors/);
+});
+
+test("stream failure retains first-content timing without inventing missing final metrics", async (t) => {
+  mockStream(t, '{"message":{"content":"Partial"}}\n');
+  let metrics;
+  await assert.rejects(streamMistral({ ...input, onMetrics: (value) => { metrics = value; } }), /before completion/);
+  assert.equal(metrics.success, false);
+  assert.ok(Number.isFinite(metrics.firstContentMs));
+  assert.equal(metrics.promptEvalMs, null);
+  assert.equal(metrics.generationMs, null);
+});
+
+test("diagnostic callback failure does not fail an otherwise complete answer", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => Response.json({ done: true, message: { content: "Complete" } }));
+  assert.equal(await askMistral({ ...input, onMetrics: () => { throw new Error("observer error"); } }), "Complete");
+});

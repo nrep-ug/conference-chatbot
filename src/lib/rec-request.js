@@ -16,6 +16,7 @@ const INTENTS = [
   ["contact", /\b(contact|email|phone|telephone)\b/],
   ["website", /\b(website|url|link)\b/],
   ["preparation", /\b(prepare|preparation|get ready|make the most)\b/],
+  ["advice", /\b(evaluate|assess|weigh|decide|decision)\b/],
   ["recommendation", /\b(recommend|attend|focus on|learn|learning|useful|relevant|interested|guide me|prioriti[sz]e)\b/],
   ["technology", /\b(technologies|technology areas)\b/],
   ["sessions", /\bsessions?\b/],
@@ -151,7 +152,25 @@ function safeDirectTask(task) {
 }
 
 function uniqueSources(sources) {
-  return [...new Map(sources.map((s) => [`${s.sourceType}:${s.rowId || s.source}`, s])).values()];
+  return [...new Map(sources.map((s) => [`${s.sourceType}:${s.rowId || ""}:${s.source}`, s])).values()];
+}
+
+function explicitTopicLookup(task, bundle) {
+  if (task.kind !== "sessions" || !bundle) return null;
+  let text = norm(task.question);
+  const depthPattern = /,?\s+and (?:is|whether) (?:their|the) technical depth (?:published|listed|available)$/;
+  const depthRequested = depthPattern.test(text);
+  text = text.replace(depthPattern, "").replace(/\s+(?:at|for) rec\s*\d{2,4}\b/g, "")
+    .replace(/\s+on days? (?:\d+|one|two|three|four)(?:\s*(?:,|and|to|-)\s*(?:day\s*)?(?:\d+|one|two|three|four))*$/, "");
+  const topic = text.match(/^(?:(?:which|what) sessions (?:are )?|are there (?:any )?sessions |(?:list|show)(?: me| for me)? (?:all )?(?:the )?sessions )(?:about|on|mention(?:ing)?|related to|connected to|covering) (.+)$/)?.[1];
+  // This is an explicit phrase lookup, not an attempt to infer arbitrary semantic filters.
+  if (!topic || !/^[\p{L}\p{N}' -]+$/u.test(topic) || topic.split(" ").length > 6 ||
+      /\b(and|or|with|without|before|after|except|only|day|days|in|on|at|for)\b/.test(topic)) return null;
+  const documents = buildRecDocuments(bundle).filter((d) => d.payload.sourceType === "session");
+  const phrase = ` ${canonicalTitle(topic)} `;
+  const matches = documents.filter((d) => ["title", "theme", "preamble", "organizer", "speakers"]
+    .some((field) => ` ${canonicalTitle(d.fields?.[field])} `.includes(phrase)));
+  return { topic, depthRequested, searched: documents.length, matches };
 }
 
 function conflictNote(answer, sources, snapshot) {
@@ -173,6 +192,7 @@ function taskDocuments(task, bundle) {
   const types = hasUnparsedConjunction(norm(task.question)) && !/\b(compare|comparison|versus)\b/i.test(task.question) ? null : {
     speakers: ["session"], sessions: ["session", "conference_day"],
     schedule: ["session", "program_time_block", "conference_day"], recommendation: ["session", "conference_day"],
+    advice: ["session", "conference_day"],
     media: ["conference_media"], reports: ["conference_report"], sponsors: ["sponsor", "sponsor_category"], partners: ["sponsor", "sponsor_category"],
     guidance: ["operational_info", "program_time_block"], ceremony: ["program_time_block"], breaks: ["program_time_block"],
   }[task.kind];
@@ -180,11 +200,59 @@ function taskDocuments(task, bundle) {
     ...(bundle.sessions || []).filter((s) => !task.days.length || task.days.includes(Number(s.day))),
     ...(bundle.timeBlocks || []).filter((b) => !task.days.length || task.days.includes(Number(b.day))),
   ].map((r) => r.$id));
-  const terms = norm(task.question).match(/[\p{L}\p{N}]{4,}/gu)?.filter((t) => !["what", "when", "where", "which", "would", "could", "should", "conference", "sessions", "session", "please", "about", "compare", "their", "there", "these", "those"].includes(t)) || [];
+  const terms = norm(task.question).match(/[\p{L}\p{N}]{4,}/gu)?.filter((t) => !["what", "when", "where", "which", "would", "could", "should", "conference", "sessions", "session", "please", "about", "compare", "their", "there", "these", "those", "first", "time", "visitor", "explain", "trade", "offs", "without", "inventing", "speakers"].includes(t)) || [];
   const rank = (doc) => terms.reduce((score, term) => score + (norm(doc.text).includes(term) ? 1 : 0), 0);
-  return buildRecDocuments(bundle).filter((d) => (!types || types.includes(d.payload.sourceType) || d.payload.sourceType === "conference_overview") &&
+  const documents = buildRecDocuments(bundle).filter((d) => (!types || types.includes(d.payload.sourceType) || d.payload.sourceType === "conference_overview") &&
     (!task.days.length || !["session", "program_time_block"].includes(d.payload.sourceType) || allowedRows.has(d.payload.rowId)))
     .sort((a, b) => rank(b) - rank(a));
+  const comparison = norm(task.question).match(/\bcompare (?:the )?(.+?) (?:and|versus|with) (.+?) sessions\b/);
+  if (!comparison) return documents;
+  let days = [];
+  try { days = JSON.parse(bundle.conference.days || "[]"); } catch { /* Missing daily themes do not prevent session lookup. */ }
+  if (!Array.isArray(days)) days = [];
+  const topics = comparison.slice(1);
+  const scored = documents.map((doc) => {
+    const scores = topics.map((topic) => (topic.match(/[\p{L}\p{N}]{4,}/gu) || []).reduce((total, word) => total +
+      (norm([doc.fields?.title, doc.fields?.theme].join(" ")).includes(word) ? 4 : 0) +
+      (norm(doc.fields?.preamble).includes(word) ? 2 : 0) +
+      (norm(days[Number(doc.fields?.day) - 1]?.theme).includes(word) ? 1 : 0), 0));
+    const best = Math.max(...scores);
+    return { ...doc, comparisonTopics: doc.fields && best > 0 ? topics.filter((_, index) => scores[index] === best) : [], scores };
+  });
+  const preferred = [];
+  for (const [index, topic] of topics.entries()) {
+    const seen = new Set();
+    const ranked = scored.filter((d) => d.comparisonTopics.includes(topic)).sort((a, b) => b.scores[index] - a.scores[index]);
+    for (const doc of ranked) {
+      const title = canonicalTitle(doc.fields.title);
+      if (seen.has(title)) continue;
+      seen.add(title);
+      preferred.push(doc);
+      if (seen.size === 2) break;
+    }
+  }
+  return [...new Set([...preferred, ...scored])];
+}
+
+function groupedEvidence(documents) {
+  const groups = new Map();
+  for (const doc of documents) {
+    if (doc.payload.sourceType !== "session" || !doc.fields) {
+      groups.set(doc.id, { text: `Record type: ${doc.payload.sourceType}\nSource: ${doc.payload.source}\n${doc.text}`, sources: [doc.payload] });
+      continue;
+    }
+    const { day, startTime, endTime, hall, ...details } = doc.fields;
+    // Only identical published details share a group; never move speakers/descriptions between different sessions.
+    const key = JSON.stringify([doc.payload.conferenceId, details]);
+    const group = groups.get(key) || { details, occurrences: [], sources: [] };
+    group.occurrences.push({ day, startTime, endTime, hall });
+    group.sources.push(doc.payload);
+    groups.set(key, group);
+  }
+  return [...groups.values()].map((group) => ({
+    ...group,
+    text: group.text || `Record type: session\n${JSON.stringify({ ...group.details, occurrences: group.occurrences })}`,
+  }));
 }
 
 // Reserve an equal evidence budget for each request; never silently discard later parts.
@@ -202,12 +270,20 @@ function buildTaskContext(results, maxChars) {
       sources.push(...result.answer.sources);
     } else {
       let included = 0;
-      for (const doc of result.documents) {
-        const row = `Record type: ${doc.payload.sourceType}\nSource: ${doc.payload.source}\n${doc.text}\n\n`;
+      const representative = (result.task.kind === "advice" || /\bcompare\b/i.test(result.task.question)) &&
+        !/\b(all|every|each|exhaustive|complete list)\b/i.test(result.task.question);
+      const sessionTitles = new Set();
+      let otherRecords = 0;
+      for (const group of groupedEvidence(result.documents)) {
+        const title = group.details ? canonicalTitle(group.details.title) : null;
+        if (representative && (title ? !sessionTitles.has(title) && sessionTitles.size >= 4 : otherRecords >= 2)) continue;
+        const row = `${group.text}\n\n`;
         if (section.length + row.length + 120 > budget) continue;
         section += row;
-        included += 1;
-        sources.push(doc.payload);
+        included += group.sources.length;
+        sources.push(...group.sources);
+        if (title) sessionTitles.add(title);
+        else otherRecords += 1;
       }
       section += `\nEvidence coverage: ${included}/${result.documents.length} records included. ${included < result.documents.length ? "Partial evidence: do not claim this is a complete list or that omitted facts do not exist." : "Say explicitly when the requested detail is not published."}`;
     }
@@ -224,6 +300,11 @@ export function verifyRecSynthesis(answer, prepared) {
   const titles = [...new Set(prepared.validation.titles.map(canonicalTitle))];
   if (titles.length === 0) return { valid: false, reason: "no_published_session_evidence" };
   const matched = titles.filter((title) => title && text.includes(title));
+  for (const group of prepared.validation.comparisonGroups || []) {
+    if (group.titles.length && !group.titles.some((title) => matched.includes(canonicalTitle(title)))) {
+      return { valid: false, reason: "missing_comparison_topic", topic: group.topic };
+    }
+  }
   for (const theme of prepared.validation.dayThemes) {
     const label = canonicalTitle(theme);
     if (label && text.includes(`${label} session`) && !titles.some((title) => title.startsWith(label))) {
@@ -272,21 +353,29 @@ export async function prepareRecRequest(question, { history = [], signal, snapsh
   const results = [];
   for (const task of request.tasks) {
     const bundle = scopedSnapshot(snapshot, task);
+    const topicLookup = explicitTopicLookup(task, bundle);
     let answer = null;
     const sessionTitles = [...new Set(bundle?.sessions.filter((s) => task.sessionIds.includes(s.$id)).map((s) => s.title))];
     if (sessionTitles.length > 1 && /\b(its|it|that session|this session)\b/i.test(task.question)) {
       answer = { answer: `Which session do you mean?\n${sessionTitles.map((title) => `- ${title}`).join("\n")}`, sources: [] };
     } else if (!task.years.length) {
       answer = { answer: "I could not find a published previous REC edition in the conference materials.", sources: [] };
+    } else if (topicLookup && !topicLookup.matches.length) {
+      const scope = `REC ${task.years.join(", ")}${task.days.length ? `, Day ${task.days.join(", ")}` : ""}${task.hall ? `, ${task.hall}` : ""}${task.dayPart ? `, ${task.dayPart}` : ""}`;
+      answer = {
+        answer: `I could not find an explicit mention of **${topicLookup.topic}** in the published session titles, themes, descriptions, organizers or speaker fields for **${scope}** (${topicLookup.searched} records checked). This does not rule out the topic being discussed; unpublished details and differently worded descriptions are not confirmation.${topicLookup.depthRequested ? "\n\nThe technical depth for this topic is therefore not confirmed in these records." : ""}`,
+        sources: buildRecDocuments(bundle).filter((d) => d.payload.sourceType === "conference_overview").map((d) => d.payload),
+      };
     } else if (safeDirectTask(task)) {
       const query = bundle ? task.query : `${task.query} for ${task.years.map((y) => `REC${String(y).slice(2)}`).join(" and ")}`;
       answer = await getDirectRecAnswer(query, { snapshot: bundle || snapshot, signal });
       if (answer && bundle && task.kind === "recommendation") answer = { ...answer, answer: conflictNote(answer.answer, answer.sources, bundle) };
     }
     const selectedBundles = bundle ? [bundle] : [snapshot, ...(snapshot.pastConferences || [])].filter((b) => task.years.includes(Number(b.conference.year)));
-    results.push({ task, answer, documents: selectedBundles.flatMap((b) => taskDocuments(task, { ...b, pastConferences: [] })) });
+    results.push({ task, answer, topicLookup, documents: topicLookup?.matches.length ? topicLookup.matches : selectedBundles.flatMap((b) => taskDocuments(task, { ...b, pastConferences: [] })) });
   }
-  const coverage = results.map(({ task, answer, documents }) => ({ id: task.id, kind: task.kind || "synthesis", years: task.years, days: task.days, status: answer ? "direct" : documents.length ? "needs_synthesis" : "no_published_evidence", records: documents.length }));
+  const coverage = results.map(({ task, answer, documents, topicLookup }) => ({ id: task.id, kind: task.kind || "synthesis", years: task.years, days: task.days, status: answer ? "direct" : documents.length ? "needs_synthesis" : "no_published_evidence", records: documents.length,
+    ...(topicLookup ? { topic: topicLookup.topic, searchedSessions: topicLookup.searched, matchingSessions: topicLookup.matches.length } : {}) }));
   const complete = results.length > 0 && results.every((r) => r.answer);
   if (!complete && maxContextChars < results.length * 450 + 500) {
     return { ...request, coverage, direct: { answer: "Please ask fewer parts at a time so each can fit within the available model context.", sources: [], retrievalPolicy: { qdrantComplement: false } } };
@@ -299,7 +388,8 @@ export async function prepareRecRequest(question, { history = [], signal, snapsh
   const requiresSelection = !direct && request.tasks.some((t) => (t.kind === "sessions" && /\b(compare|comparison|versus)\b/i.test(t.question)) || t.kind === "recommendation");
   const selectedYears = new Set(request.tasks.flatMap((t) => t.years));
   const bundles = [snapshot, ...(snapshot.pastConferences || [])].filter((b) => selectedYears.has(Number(b.conference.year)));
-  const titles = [...new Set(results.flatMap((r) => r.documents).filter((d) => d.payload.sourceType === "session").map((d) => d.payload.source))];
+  const packed = buildTaskContext(results, maxContextChars);
+  const titles = [...new Set(packed.sources.filter((source) => source.sourceType === "session").map((source) => source.source))];
   const dayThemes = bundles.flatMap((bundle) => {
     try {
       const days = JSON.parse(bundle.conference.days || "[]");
@@ -309,7 +399,14 @@ export async function prepareRecRequest(question, { history = [], signal, snapsh
   const validation = requiresSelection ? {
     titles,
     dayThemes,
+    comparisonGroups: results.flatMap((result) => {
+      const topics = [...new Set(result.documents.flatMap((d) => d.comparisonTopics || []))];
+      return topics.map((topic) => ({ topic, titles: [...new Set(result.documents.filter((d) => d.comparisonTopics?.includes(topic) &&
+        packed.sources.some((s) => s.rowId === d.payload.rowId && s.sourceType === "session")).map((d) => d.payload.source))] }));
+    }),
     minTitles: Math.min(titles.length, request.tasks.some((t) => /\b(compare|comparison|versus)\b/i.test(t.question)) ? 2 : 1),
   } : null;
-  return { ...request, direct, coverage, validation, fallback: requiresSelection ? buildSynthesisFallback(results, snapshot) : null, ...buildTaskContext(results, maxContextChars) };
+  return { ...request, direct, coverage, validation, fallback: requiresSelection ? buildSynthesisFallback(results, snapshot) : null,
+    indexedExclusions: uniqueSources(results.flatMap((r) => r.documents.map((d) => d.payload))).map((s) => `${s.sourceType}:${s.rowId || s.source}`),
+    ...packed };
 }

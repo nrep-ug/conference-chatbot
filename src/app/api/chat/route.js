@@ -457,11 +457,13 @@ async function retrieveContext(question, signal, options = {}) {
   const minScore = options.minScore ?? MIN_SEARCH_SCORE;
   const maxContextChars = options.maxContextChars || MAX_CONTEXT_CHARS;
 
-  const searchResults = await qdrant.search(QDRANT_COLLECTION, {
+  const found = await qdrant.search(QDRANT_COLLECTION, {
     vector: queryVector,
     limit,
     with_payload: true,
   });
+  const searchResults = found.filter((result) => !options.excludeSources?.includes(sourceKey(result.payload)) &&
+    (!options.years || options.years.includes(Number(result.payload?.year))));
   const topScore = searchResults[0]?.score || 0;
 
   if (topScore < minScore) {
@@ -605,6 +607,7 @@ async function complementDirectAnswer(
     const answerStartedAt = Date.now();
     const answer = useModel
       ? await askMistral({
+          requestId,
           question,
           context: buildComplementContext(directAnswer, retrieved.context),
           history,
@@ -660,6 +663,8 @@ async function prepareAnswerRequest(question, history, signal, requestId) {
           limit: QDRANT_COMPLEMENT_SEARCH_LIMIT,
           maxContextChars: Math.min(QDRANT_COMPLEMENT_MAX_CONTEXT_CHARS, Math.max(0, contextBudget - prepared.context.length - 150)),
           minScore: QDRANT_COMPLEMENT_MIN_SCORE,
+          excludeSources: prepared.indexedExclusions,
+          years: [...new Set(prepared.tasks.flatMap((task) => task.years))],
         });
         if (extra.confident && prepared.context.length + extra.context.length + 150 <= contextBudget) {
           prepared.context += `\n\nSupplementary indexed evidence (the structured facts above take precedence):\n${extra.context}`;
@@ -747,6 +752,7 @@ async function answerQuestion(question, history, signal, requestId) {
   if (fullRecContext.confident) {
     const answerStartedAt = Date.now();
     const answer = await askMistral({
+      requestId,
       question,
       context: fullRecContext.context,
       history,
@@ -781,6 +787,7 @@ async function answerQuestion(question, history, signal, requestId) {
   if (fullQdrantContext.confident) {
     const answerStartedAt = Date.now();
     const answer = await askMistral({
+      requestId,
       question,
       context: fullQdrantContext.context,
       history,
@@ -811,6 +818,7 @@ async function answerQuestion(question, history, signal, requestId) {
   if (plannedContext.confident) {
     const answerStartedAt = Date.now();
     const answer = await askMistral({
+      requestId,
       question,
       context: plannedContext.context,
       history,
@@ -849,6 +857,7 @@ async function answerQuestion(question, history, signal, requestId) {
 
   const answerStartedAt = Date.now();
   const answer = await askMistral({
+    requestId,
     question,
     context,
     history,
@@ -1002,7 +1011,7 @@ function streamAnswer(question, history, signal, requestId) {
           if (fullRecContext.confident) {
             if (fullRecContext.validation) {
               // Hold selection claims until their session identity checks pass.
-              const answer = await askMistral({ question, context: fullRecContext.context, history, signal });
+              const answer = await askMistral({ question, context: fullRecContext.context, history, signal, requestId });
               const verification = verifyRecSynthesis(answer, fullRecContext);
               const payload = verification.valid ? { answer, sources: fullRecContext.sources } : fullRecContext.fallback;
               setCachedAnswer(question, payload, history);
@@ -1017,6 +1026,7 @@ function streamAnswer(question, history, signal, requestId) {
 
             const answerStartedAt = Date.now();
             const answer = await streamMistral({
+              requestId,
               question,
               context: fullRecContext.context,
               history,
@@ -1055,6 +1065,7 @@ function streamAnswer(question, history, signal, requestId) {
 
             const answerStartedAt = Date.now();
             const answer = await streamMistral({
+              requestId,
               question,
               context: fullQdrantContext.context,
               history,
@@ -1094,6 +1105,7 @@ function streamAnswer(question, history, signal, requestId) {
 
             const answerStartedAt = Date.now();
             const answer = await streamMistral({
+              requestId,
               question,
               context: plannedContext.context,
               history,
@@ -1148,6 +1160,7 @@ function streamAnswer(question, history, signal, requestId) {
 
           const answerStartedAt = Date.now();
           const answer = await streamMistral({
+            requestId,
             question,
             context,
             history,
@@ -1186,6 +1199,7 @@ function streamAnswer(question, history, signal, requestId) {
         "Cache-Control": "no-cache, no-transform",
         Connection: "keep-alive",
         "X-Accel-Buffering": "no",
+        "X-Request-Id": requestId,
       },
     }
   );
@@ -1205,7 +1219,7 @@ export async function POST(request) {
     if (!questionValidation.valid) {
       return Response.json(
         { error: questionValidation.error },
-        { status: 400 }
+        { status: 400, headers: { "X-Request-Id": requestId } }
       );
     }
 
@@ -1245,7 +1259,7 @@ export async function POST(request) {
       cached: Boolean(response.cached),
     });
 
-    return Response.json(response);
+    return Response.json(response, { headers: { "X-Request-Id": requestId } });
   } catch (error) {
     console.error(error);
     logChatEvent("request_error", {
@@ -1256,7 +1270,7 @@ export async function POST(request) {
 
     return Response.json(
       { error: getClientErrorMessage(error) },
-      { status: isRequestTimeout(error) ? 504 : 500 }
+      { status: isRequestTimeout(error) ? 504 : 500, headers: { "X-Request-Id": requestId } }
     );
   }
 }

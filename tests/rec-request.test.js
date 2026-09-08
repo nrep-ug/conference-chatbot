@@ -104,9 +104,99 @@ test("unknown compound parts cannot disappear behind a successful lookup", async
 });
 
 test("does not claim arbitrary session qualifiers are answered by a generic list", async () => {
-  for (const question of ["Which sessions were cancelled?", "Which sessions have available seats?", "Compare the sessions", "Which sessions are about hydrogen?"]) {
+  for (const question of ["Which sessions were cancelled?", "Which sessions have available seats?", "Compare the sessions", "Which sessions are about hydrogen and have live demonstrations?"]) {
     const result = await run(question);
     assert.equal(result.direct, null, question);
+  }
+});
+
+test("explicit topic absence checks every published session field without a model", async () => {
+  for (const topic of ["hydrogen", "tidal power", "wave-energy storage"]) {
+    const result = await run(`Which sessions are about ${topic}, and is their technical depth published?`);
+    assert.ok(result.direct);
+    assert.match(result.direct.answer, /explicit mention/);
+    assert.match(result.direct.answer, /technical depth.*not confirmed/i);
+    assert.match(result.direct.answer, /does not rule out/);
+    assert.equal(result.coverage[0].matchingSessions, 0);
+    assert.equal(result.coverage[0].searchedSessions, 5);
+  }
+});
+
+test("topic matching finds evidence in descriptions, organizers and structured speakers, not just titles", async () => {
+  for (const field of ["title", "theme", "preamble", "organizer", "speakers"]) {
+    const snapshot = createSnapshot();
+    const session = snapshot.sessions.find((s) => s.$id === "investment-day-2");
+    session[field] = field === "speakers" ? JSON.stringify(["Hydrogen Specialist"]) : "Published hydrogen research";
+    const result = await run("Which sessions mention hydrogen?", [], { snapshot });
+    assert.equal(result.direct, null, field);
+    assert.equal(result.coverage[0].matchingSessions, 1, field);
+    assert.ok(result.sources.some((source) => source.rowId === session.$id));
+    assert.ok(result.sources.every((source) => source.rowId === session.$id));
+  }
+});
+
+test("explicit topic searches respect edition, day and publication restrictions", async () => {
+  const snapshot = createSnapshot();
+  snapshot.sessions.find((s) => s.$id === "investment-day-2").preamble = "Hydrogen project development";
+  snapshot.sessions.find((s) => s.status === "DRAFT").title = "Tidal Power";
+  for (const question of ["Which sessions mention hydrogen on day 3?", "Which sessions mention hydrogen at REC25?", "Which sessions mention tidal power?"]) {
+    const result = await run(question, [], { snapshot });
+    assert.ok(result.direct, question);
+    assert.equal(result.coverage[0].matchingSessions, 0, question);
+  }
+});
+
+test("unknown qualifiers cannot be discarded by topic or day parsing", async () => {
+  for (const question of ["Which sessions are about hydrogen on day 2 and offer training", "Which sessions are about hydrogen and what are the fees?"]) {
+    const result = await run(question);
+    assert.ok(!result.direct || result.coverage.length > 1, question);
+  }
+});
+
+test("identical published descriptions are packed once with all occurrence slots and sources", async () => {
+  const snapshot = createSnapshot();
+  const original = snapshot.sessions.find((s) => s.$id === "investment-day-2");
+  original.preamble = "Shared detailed finance evidence.";
+  snapshot.sessions.push({ ...original, $id: "repeat", venueHall: "Victoria Hall" });
+  snapshot.sessions.push({ ...original, $id: "different", speakers: "Different published speaker" });
+  const result = await run("Compare the investment sessions", [], { snapshot });
+  assert.equal(result.context.split("Shared detailed finance evidence.").length - 1, 2);
+  assert.match(result.context, /"occurrences":\[\{.*Katonga Hall.*Victoria Hall/);
+  assert.match(result.context, /Different published speaker/);
+  for (const id of [original.$id, "repeat", "different"]) assert.ok(result.sources.some((source) => source.rowId === id));
+});
+
+test("business evaluation gets session evidence rather than irrelevant timetable blocks", async () => {
+  const result = await run("Who are the sponsors? And how should a small business owner evaluate the opportunities discussed at the conference?");
+  assert.equal(result.tasks[1].kind, "advice");
+  assert.match(result.context, /GIZ Uganda/);
+  assert.match(result.context, /Renewable Energy Investment Forum/);
+  assert.doesNotMatch(result.context, /Record type: program_time_block/);
+});
+
+test("representative comparisons retain both topics and do not fill the budget with one topic", async () => {
+  const snapshot = createSnapshot();
+  const original = snapshot.sessions.find((s) => s.$id === "investment-day-2");
+  for (let i = 0; i < 15; i += 1) snapshot.sessions.push({ ...original, $id: `investment-${i}`, title: `Investment Forum ${i}` });
+  const result = await run("Compare the technology and investment sessions", [], { snapshot, maxContextChars: 9000 });
+  assert.match(result.context, /Clean Cooking Technology Forum/);
+  assert.match(result.context, /Renewable Energy Investment Forum/);
+  assert.match(result.context, /Partial evidence/);
+  assert.ok(new Set(result.sources.filter((s) => s.sourceType === "session").map((s) => s.source)).size <= 4);
+  assert.ok(result.context.length < 6000);
+  assert.ok(result.validation.titles.every((title) => result.context.includes(title)));
+  assert.equal(verifyRecSynthesis("Financing Universal Energy Access and Renewable Energy Investment Forum discuss investment.", result).reason, "missing_comparison_topic");
+  assert.equal(verifyRecSynthesis("Clean Cooking Technology Forum and Renewable Energy Investment Forum are published examples.", result).valid, true);
+});
+
+test("all sessions displayed in a day schedule have supporting source references", async () => {
+  const snapshot = createSnapshot();
+  const original = snapshot.sessions.find((s) => s.$id === "investment-day-2");
+  for (let i = 0; i < 10; i += 1) snapshot.sessions.push({ ...original, $id: `additional-${i}`, title: `Published Session ${i}` });
+  const result = await run("What happens on Day 2?", [], { snapshot });
+  for (let i = 0; i < 10; i += 1) {
+    assert.match(result.direct.answer, new RegExp(`Published Session ${i}`));
+    assert.ok(result.direct.sources.some((s) => s.rowId === `additional-${i}`));
   }
 });
 

@@ -1,13 +1,41 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
+import { pathToFileURL } from "node:url";
 import { readGeneratedRecSnapshot, snapshotToRuntimeData } from "../src/lib/rec-snapshot.js";
 
+export function evaluateOutcome(result, { maxDurationMs = 30000, maxFirstContentMs = 10000 } = {}) {
+  const latencyErrors = [];
+  if (result.durationMs > maxDurationMs) latencyErrors.push(`Total latency exceeds ${maxDurationMs}ms`);
+  if (result.firstTokenMs > maxFirstContentMs) latencyErrors.push(`First content exceeds ${maxFirstContentMs}ms`);
+  const outcome = result.errors?.length ? "failed" : result.validationFallback ? "degraded" : "checks_passed";
+  return { outcome, latencyErrors, accepted: outcome === "checks_passed" && latencyErrors.length === 0 };
+}
+
+export function summarizeEvaluation(results) {
+  const times = results.filter((r) => Number.isFinite(r.durationMs)).map((r) => r.durationMs).sort((a, b) => a - b);
+  const percentile = (fraction) => times[Math.max(0, Math.ceil(times.length * fraction) - 1)] ?? null;
+  return { total: results.length, checksPassed: results.filter((r) => !r.errors.length).length,
+    accepted: results.filter((r) => r.accepted).length, degraded: results.filter((r) => r.outcome === "degraded").length,
+    failed: results.filter((r) => r.outcome === "failed").length,
+    cached: results.filter((r) => r.cached).length,
+    slow: results.filter((r) => r.latencyErrors.length).length,
+    requiresHumanReview: results.filter((r) => r.requiresHumanReview).length,
+    p50Ms: percentile(0.5), p95Ms: percentile(0.95) };
+}
+
+async function main() {
 const { values } = parseArgs({ options: {
   "base-url": { type: "string", default: "http://127.0.0.1:3000" },
   models: { type: "boolean", default: false },
   only: { type: "string" },
   timeout: { type: "string", default: "330000" },
+  "max-duration-ms": { type: "string", default: "30000" },
+  "max-first-content-ms": { type: "string", default: "10000" },
 } });
+for (const key of ["timeout", "max-duration-ms", "max-first-content-ms"]) {
+  if (!Number.isFinite(Number(values[key])) || Number(values[key]) <= 0) throw new Error(`--${key} must be a positive number`);
+}
+const thresholds = { maxDurationMs: Number(values["max-duration-ms"]), maxFirstContentMs: Number(values["max-first-content-ms"]) };
 const snapshot = snapshotToRuntimeData(await readGeneratedRecSnapshot());
 const active = snapshot.conference;
 const sessionOn = (day) => snapshot.sessions.find((s) => s.day === day)?.title?.trim();
@@ -37,21 +65,25 @@ if (past) checks.push([
 ]);
 if (values.models) checks.push(
   [{ question: "Compare the technology and investment sessions for a first-time visitor. Explain the trade-offs, without inventing speakers.", contains: ["investment"], minSessionTitles: 2, modelReview: true }],
-  [{ question: "Who are the sponsors? And how should a small business owner evaluate the opportunities discussed at the conference?", contains: [sponsor], modelReview: true }],
+  [{ question: "Who are the sponsors? And how should a small business owner evaluate the opportunities discussed at the conference?", contains: [sponsor], evaluationAdvice: true, modelReview: true }],
   [{ question: "Which sessions are about hydrogen, and is their technical depth published?", rejectBlanketAbsence: true, modelReview: true }],
 );
 
 async function ask(question, history, stream) {
   const start = performance.now();
+  let requestId = null;
+  try {
   const response = await fetch(new URL("/api/chat", values["base-url"]), {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question, history, stream }), signal: AbortSignal.timeout(Number(values.timeout)),
   });
+  requestId = response.headers.get("x-request-id");
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
-  if (!stream) return { ...await response.json(), durationMs: Math.round(performance.now() - start), firstTokenMs: null };
-  let answer = "", sources = [], buffer = "", firstTokenMs = null, done = false, validationFallback = false;
+  if (!stream) return { ...await response.json(), requestId, durationMs: Math.round(performance.now() - start), firstTokenMs: null };
+  let answer = "", sources = [], buffer = "", firstTokenMs = null, done = false, validationFallback = false, cached = false;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  try {
   while (true) {
     const chunk = await reader.read();
     if (chunk.done) break;
@@ -61,14 +93,23 @@ async function ask(question, history, stream) {
     for (const event of events) {
       const kind = event.match(/^event: (.+)/m)?.[1];
       const data = JSON.parse(event.match(/^data: (.+)/m)?.[1] || "null");
-      if (kind === "error") return { answer, sources: [], error: data.error, durationMs: Math.round(performance.now() - start), firstTokenMs };
+      if (kind === "error") return { answer, sources: [], error: data.error, requestId, durationMs: Math.round(performance.now() - start), firstTokenMs };
       if (kind === "sources") sources = data;
       if (kind === "token") { answer += data; firstTokenMs ??= Math.round(performance.now() - start); }
-      if (kind === "done") { done = true; validationFallback = data.validationFallback === true; }
+      if (kind === "done") { done = true; validationFallback = data.validationFallback === true; cached = data.cached === true; }
     }
   }
   if (!done) throw new Error("SSE ended without a done event");
-  return { answer, sources, validationFallback, durationMs: Math.round(performance.now() - start), firstTokenMs };
+  return { answer, sources, requestId, validationFallback, cached, durationMs: Math.round(performance.now() - start), firstTokenMs };
+  } catch (error) {
+    return { answer, sources: [], error: error.message, requestId, durationMs: Math.round(performance.now() - start), firstTokenMs };
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  } catch (error) {
+    return { answer: "", sources: [], error: error.message, requestId, durationMs: Math.round(performance.now() - start), firstTokenMs: null };
+  }
 }
 
 const results = [];
@@ -92,21 +133,31 @@ for (const scenario of selected) {
         if (titles.filter((title) => title && answerText.includes(title)).length < check.minSessionTitles) errors.push("Comparison lacks enough exact published session titles");
       }
       if (check.rejectBlanketAbsence && /\b(there are no|does not have any|no sessions|none of the sessions)\b/i.test(result.answer) && !/\b(provided|supplied|could not find|could not confirm)\b/i.test(result.answer)) errors.push("Unqualified absence claim needs evidence review");
+      if (check.evaluationAdvice) {
+        const criteria = [/\b(costs?|budget|cash flow|payback)\b/i, /\b(customer|market|demand|fit)\b/i, /\b(risks?|terms|verify|evidence|compare|due diligence)\b/i];
+        if (criteria.filter((pattern) => pattern.test(result.answer)).length < 2) errors.push("Missing practical evaluation criteria; recommending sessions alone does not answer how to evaluate opportunities");
+      }
       if (check.sources !== undefined && result.sources.length !== check.sources) errors.push("Unexpected sources");
       if (!result.answer.trim()) errors.push("Empty answer");
-      results.push({ question: check.question, stream, ...result, errors, requiresHumanReview: check.modelReview || false });
+      const outcome = evaluateOutcome({ ...result, errors }, thresholds);
+      results.push({ question: check.question, stream, ...result, errors, ...outcome, requiresHumanReview: check.modelReview || false });
       if (!result.error) history.push({ role: "user", content: check.question }, { role: "assistant", content: result.answer });
-      console.log(`${errors.length ? "FAIL" : "PASS"} ${result.durationMs}ms ${check.question}${errors.length ? `: ${errors.join("; ")}` : ""}`);
+      console.log(`${outcome.outcome.toUpperCase()}${outcome.latencyErrors.length ? " / SLOW" : ""} ${result.durationMs}ms ${check.question}${errors.length ? `: ${errors.join("; ")}` : ""}`);
     } catch (error) {
-      results.push({ question: check.question, stream, errors: [error.message] });
+      const result = { question: check.question, stream, errors: [error.message], requiresHumanReview: check.modelReview || false };
+      results.push({ ...result, ...evaluateOutcome(result, thresholds) });
       console.log(`FAIL ${check.question}: ${error.message}`);
     }
     await writeFile(path, JSON.stringify({ complete: false, results }, null, 2));
   }
 }
-const times = results.filter((r) => Number.isFinite(r.durationMs)).map((r) => r.durationMs).sort((a, b) => a - b);
-const summary = { total: results.length, passed: results.filter((r) => !r.errors.length).length, validationFallbacks: results.filter((r) => r.validationFallback).length, p50Ms: times[Math.floor(times.length * 0.5)] || 0, p95Ms: times[Math.min(times.length - 1, Math.floor(times.length * 0.95))] || 0, modelsIncluded: values.models };
-await writeFile(path, JSON.stringify({ complete: true, at: new Date().toISOString(), summary, results }, null, 2));
+const summary = { ...summarizeEvaluation(results), modelsIncluded: values.models };
+await writeFile(path, JSON.stringify({ complete: true, at: new Date().toISOString(), thresholds, summary, results }, null, 2));
 console.log(JSON.stringify(summary));
 console.log(`Report: ${path}`);
-if (summary.passed !== summary.total) process.exitCode = 1;
+if (summary.accepted !== summary.total) process.exitCode = 1;
+}
+
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((error) => { console.error(error.message); process.exitCode = 1; });
+}

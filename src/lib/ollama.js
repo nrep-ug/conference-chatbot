@@ -1,6 +1,7 @@
 import os from "node:os";
 
 import { sanitizeChatHistory } from "./chat-conversation.js";
+import { logChatEvent } from "./chat-diagnostics.js";
 
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
 const CHAT_MODEL = process.env.CHAT_MODEL || "mistral";
@@ -123,6 +124,32 @@ function createRequestSignal(parentSignal) {
   };
 }
 
+function createModelTrace({ model, role, stream, messages, options, requestId, onMetrics }) {
+  const startedAt = performance.now();
+  let firstContentMs = null, packet = {}, success = false;
+  const metadata = { requestId, model, role, stream, contextSize: options.num_ctx, outputLimit: options.num_predict,
+    inputChars: messages.reduce((sum, message) => sum + message.content.length, 0) };
+  logChatEvent("ollama_request_start", metadata);
+  return {
+    content() { firstContentMs ??= Math.round(performance.now() - startedAt); },
+    response(data) { packet = data; },
+    complete() { success = true; },
+    finish() {
+      // Ollama durations are nanoseconds. Missing final metrics stay null on timeouts.
+      const number = (key) => Number.isFinite(packet[key]) && packet[key] >= 0 ? packet[key] : null;
+      const ms = (key) => number(key) === null ? null : Math.round(number(key) / 1e6);
+      const metrics = { ...metadata, success, durationMs: Math.round(performance.now() - startedAt), firstContentMs,
+        loadMs: ms("load_duration"), promptEvalMs: ms("prompt_eval_duration"), generationMs: ms("eval_duration"),
+        totalModelMs: ms("total_duration"), promptEvalCount: number("prompt_eval_count"), evalCount: number("eval_count"),
+        generatedPerSecond: number("eval_duration") > 0 && number("eval_count") !== null
+          ? Math.round(number("eval_count") / (number("eval_duration") / 1e9) * 100) / 100 : null,
+        doneReason: typeof packet.done_reason === "string" ? packet.done_reason : null };
+      logChatEvent(success ? "ollama_request_done" : "ollama_request_error", metrics);
+      try { onMetrics?.(metrics); } catch { /* Diagnostics must not change the answer. */ }
+    },
+  };
+}
+
 export function buildAnswerMessages({ question, context, history = [] }) {
   const conversation = sanitizeChatHistory(history);
 
@@ -140,6 +167,8 @@ export function buildAnswerMessages({ question, context, history = [] }) {
         "Verify each session and ceremony against its own day/time row. Explain recommendation relevance using published fields and flag conflicting times; concurrent sessions cannot both be attended in full.",
         "Use exact published session titles. A daily theme such as Technology & Innovation is not itself a session. Never construct a session by combining a conference theme with a generic timetable block.",
         "For comparisons, contrast the requested topics using representative published examples rather than copying the entire programme. For daily progression, connect daily themes to concrete topics without inventing relationships.",
+        "A title-only, TBC or Under Development record does not establish technical depth, format or learning outcomes. Do not claim a session excludes technical content just because its description is missing. State those limits and label title-based relevance as inference.",
+        "When asked how to evaluate opportunities, provide a practical decision process, not just sessions to attend. Label suggested questions and criteria (customer fit, costs, financing terms, delivery risks, evidence to request) as advice, not published conference claims.",
         "Use short Markdown paragraphs, bullets and bold labels; numbered lists for rankings. No whole-answer code fences or tables unless requested.",
         "Acknowledge social follow-ups naturally. Redirect genuinely unrelated requests to conference topics.",
       ].join("\n"),
@@ -238,8 +267,11 @@ export async function getEmbedding(text, { signal } = {}) {
   }
 }
 
-export async function askPlanner({ question, schema, history, signal }) {
+export async function askPlanner({ question, schema, history, signal, requestId, onMetrics }) {
   const requestSignal = createRequestSignal(signal);
+  const options = buildPlannerOptions();
+  const messages = buildPlannerMessages({ question, schema, history });
+  const trace = createModelTrace({ model: PLANNER_MODEL, role: "planner", stream: false, messages, options, requestId, onMetrics });
 
   try {
     const response = await fetch(`${OLLAMA_URL}/api/chat`, {
@@ -253,8 +285,8 @@ export async function askPlanner({ question, schema, history, signal }) {
         format: "json",
         stream: false,
         keep_alive: PLANNER_KEEP_ALIVE,
-        options: buildPlannerOptions(),
-        messages: buildPlannerMessages({ question, schema, history }),
+        options,
+        messages,
       }),
     });
 
@@ -263,14 +295,21 @@ export async function askPlanner({ question, schema, history, signal }) {
     }
 
     const data = await response.json();
-    return completedAnswer(data, data.message?.content, "PLANNER_NUM_PREDICT");
+    trace.response(data);
+    const answer = completedAnswer(data, data.message?.content, "PLANNER_NUM_PREDICT");
+    trace.complete();
+    return answer;
   } finally {
     requestSignal.cleanup();
+    trace.finish();
   }
 }
 
-export async function askMistral({ question, context, history, signal }) {
+export async function askMistral({ question, context, history, signal, requestId, onMetrics }) {
   const requestSignal = createRequestSignal(signal);
+  const options = buildChatOptions(context);
+  const messages = buildAnswerMessages({ question, context, history });
+  const trace = createModelTrace({ model: CHAT_MODEL, role: "answer", stream: false, messages, options, requestId, onMetrics });
 
   try {
     const response = await fetch(`${OLLAMA_URL}/api/chat`, {
@@ -283,8 +322,8 @@ export async function askMistral({ question, context, history, signal }) {
         model: CHAT_MODEL,
         stream: false,
         keep_alive: CHAT_KEEP_ALIVE,
-        options: buildChatOptions(context),
-        messages: buildAnswerMessages({ question, context, history }),
+        options,
+        messages,
       }),
     });
 
@@ -293,9 +332,13 @@ export async function askMistral({ question, context, history, signal }) {
     }
 
     const data = await response.json();
-    return completedAnswer(data, data.message?.content);
+    trace.response(data);
+    const answer = completedAnswer(data, data.message?.content);
+    trace.complete();
+    return answer;
   } finally {
     requestSignal.cleanup();
+    trace.finish();
   }
 }
 
@@ -305,8 +348,19 @@ export async function streamMistral({
   history,
   signal,
   onToken,
+  requestId,
+  onMetrics,
 }) {
   const requestSignal = createRequestSignal(signal);
+  const options = buildChatOptions(context);
+  const messages = buildAnswerMessages({ question, context, history });
+  const trace = createModelTrace({ model: CHAT_MODEL, role: "answer", stream: true, messages, options, requestId, onMetrics });
+  const finishAnswer = (data, content) => {
+    trace.response(data);
+    const answer = completedAnswer(data, content);
+    trace.complete();
+    return answer;
+  };
 
   try {
     const response = await fetch(`${OLLAMA_URL}/api/chat`, {
@@ -319,8 +373,8 @@ export async function streamMistral({
         model: CHAT_MODEL,
         stream: true,
         keep_alive: CHAT_KEEP_ALIVE,
-        options: buildChatOptions(context),
-        messages: buildAnswerMessages({ question, context, history }),
+        options,
+        messages,
       }),
     });
 
@@ -354,12 +408,13 @@ export async function streamMistral({
         const token = data.message?.content || "";
 
         if (token) {
+          trace.content();
           answer += token;
           onToken?.(token);
         }
 
         if (data.done) {
-          return completedAnswer(data, answer);
+          return finishAnswer(data, answer);
         }
       }
     }
@@ -369,10 +424,11 @@ export async function streamMistral({
       if (data.error) throw new Error(`Chat stream failed: ${data.error}`);
       const token = data.message?.content || "";
       if (token) {
+        trace.content();
         answer += token;
         onToken?.(token);
       }
-      if (data.done) return completedAnswer(data, answer);
+      if (data.done) return finishAnswer(data, answer);
     }
     throw new Error("The answer stream ended before completion.");
     } finally {
@@ -381,6 +437,7 @@ export async function streamMistral({
     }
   } finally {
     requestSignal.cleanup();
+    trace.finish();
   }
 }
 

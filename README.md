@@ -306,6 +306,7 @@ The app writes one-line JSON diagnostic events to stdout, which PM2 captures. Us
 - `request_start`
 - `request_coverage` (per-part intent, edition, days, direct/synthesis status and candidate record count)
 - `request_complement_unavailable` (optional enrichment failed or timed out)
+- `ollama_request_start`, `ollama_request_done`, `ollama_request_error` (model name, input size, context/output limits, loading, prompt evaluation and generation timings)
 - `answer_direct_appwrite`
 - `planner_executed`
 - `planner_invalid_or_empty`
@@ -321,6 +322,29 @@ pm2 logs rec-expo-chatbot --lines 200 --nostream
 ```
 
 The diagnostic logs intentionally omit environment secrets and trim long values, but they can include the user's question and planner keywords. Turn `CHAT_DIAGNOSTIC_LOGS=false` after testing if you do not want prompt-level logs in production.
+
+Each HTTP response includes `X-Request-Id`; the evaluator saves it so a slow answer
+can be matched to PM2 events. Model timings use milliseconds: `loadMs` measures
+loading, `promptEvalMs` measures prompt processing, and `generationMs` measures
+output generation. `promptEvalCount`, `evalCount` and `generatedPerSecond` help
+compare models and context sizes. `firstContentMs` measures the first streamed
+content from Ollama, not the first byte sent to the browser. Validated answers
+are buffered before delivery; non-streamed calls have no first-content measurement.
+Timeouts retain elapsed/first-content timing, but missing final metrics remain null.
+These counters come from the [Ollama chat API](https://docs.ollama.com/api/chat).
+
+For slow VPS model requests, collect these while a request is running:
+
+```bash
+ollama ps
+free -h
+vmstat 1 10
+pm2 logs rec-expo-chatbot --lines 200 --nostream
+```
+
+Long loading/prompt times need a memory, swap and CPU investigation before raising
+timeouts. The evaluation report alone cannot distinguish those causes. Do not
+share `.env.local`, API keys or SMTP credentials.
 
 ## Useful Scripts
 
@@ -416,6 +440,28 @@ recommendation quality. Review unsupported claims, omitted question parts and
 schedule conflicts before considering a model/configuration validated. Reports
 contain public test prompts and responses; keep them private if you add real user
 conversations. No data re-ingestion is required for routing-only code changes.
+
+Reports distinguish `checks_passed`, `degraded` (a validation fallback) and `failed`.
+An answer is automatically `accepted` only if its checks pass without a fallback
+and it meets the latency thresholds: 30 seconds total and 10 seconds to first
+streamed content by default. Slow answers are flagged separately, even when their
+keyword checks pass. Fallbacks, assertion failures and latency failures all produce
+a nonzero exit code. Override thresholds explicitly with `--max-duration-ms` and
+`--max-first-content-ms`; this changes evaluation acceptance, not server timeouts.
+Human review is still required for model-backed advice and comparisons. A list of
+recommended sessions alone no longer passes the business-evaluation question.
+Cached responses are counted separately; restart the chatbot before an uncached
+benchmark. Repeating cached prompts does not measure model inference speed.
+
+Explicit session-topic lookups check titles, themes, descriptions, organizers and
+speaker fields in the scoped public snapshot. A no-match answer is limited to an
+explicit phrase not being found; it does not claim the subject cannot be discussed.
+Comparisons and business advice use a bounded set of representative session titles;
+identical details share occurrence slots, while differing speakers/descriptions
+stay separate. Exhaustive requests retain the larger evidence budget and partial
+coverage warnings. Qdrant complements skip database records already considered and
+must carry an edition `year` matching the request, preventing unrelated editions
+or untagged documents from being appended to scoped answers.
 
 ## Reverse Proxy Notes
 

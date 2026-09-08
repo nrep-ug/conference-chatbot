@@ -623,7 +623,7 @@ export async function retrievePlannedRecContext(
 
   try {
     const schema = getPlannerSchemaPrompt().slice(0, MAX_SCHEMA_CHARS);
-    const rawPlanText = await askPlanner({ question, schema, history, signal });
+    const rawPlanText = await askPlanner({ question, schema, history, signal, requestId });
     const rawPlan = extractJsonObject(rawPlanText);
     const plan = validateRecPlan(rawPlan, question);
 

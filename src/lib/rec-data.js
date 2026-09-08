@@ -317,6 +317,11 @@ function buildSessionDocuments(sessions) {
     sourceType: "session",
     title: session.title,
     row: session,
+    fields: {
+      title: session.title, theme: session.theme, preamble: stripHtml(session.preamble),
+      organizer: stripHtml(session.organizer), speakers: normalizeSpeakerText(session.speakers), status: session.status,
+      day: session.day, startTime: formatTime(session.startTime), endTime: formatTime(session.toTime), hall: session.venueHall,
+    },
     text: compact([
       `Session: ${session.title}`,
       `Theme: ${session.theme}`,
@@ -469,6 +474,7 @@ export function buildRecDocuments(snapshot) {
         document.row?.$id || index
       }:${index}`,
       text: document.text,
+      fields: document.fields,
       payload: {
         source: document.title || document.sourceType,
         sourceType: document.sourceType,
@@ -3940,12 +3946,10 @@ function getCompoundDirectAnswer(normalized, snapshot, sources) {
         ...snapshot.timeBlocks
           .filter((block) => block.day === requestedDay)
           .filter((block) => blockOverlapsDayPart(block, requestedDayPart))
-          .slice(0, 10)
           .map((block) => sourceFor("program_time_block", block, block.label)),
         ...snapshot.sessions
           .filter((session) => session.day === requestedDay)
           .filter((session) => sessionOverlapsDayPart(session, requestedDayPart))
-          .slice(0, 8)
           .map((session) => sourceFor("session", session, session.title)),
       ]
     );
@@ -4610,12 +4614,10 @@ export async function getDirectRecAnswer(
         ...snapshot.timeBlocks
           .filter((block) => block.day === requestedDay)
           .filter((block) => blockOverlapsDayPart(block, requestedDayPart))
-          .slice(0, 10)
           .map((block) => sourceFor("program_time_block", block, block.label)),
         ...snapshot.sessions
           .filter((session) => session.day === requestedDay)
           .filter((session) => sessionOverlapsDayPart(session, requestedDayPart))
-          .slice(0, 8)
           .map((session) => sourceFor("session", session, session.title)),
       ],
     };
