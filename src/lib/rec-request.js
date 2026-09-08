@@ -348,6 +348,11 @@ function buildTaskContext(results, maxChars) {
 }
 
 const canonicalTitle = (text) => norm(text).replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+const DECISION_CHECKS = [
+  { key: "customerFit", label: "Customer and problem fit", pattern: /\b(customer|market|demand|problem|fit|business needs|business requirements|use case)\b/i },
+  { key: "costsAndTerms", label: "Costs and financing", pattern: /\b(costs?|budget|cash flow|payback|financing terms)\b/i },
+  { key: "deliveryEvidence", label: "Delivery risks and evidence", pattern: /\b(risks?|terms|verify|evidence|compare|due diligence|warrant\w*|references|case stud(?:y|ies)|pilot project|track record|performance data)\b/i },
+];
 
 function hasUnsupportedSessionDetail(answer, evidence) {
   const features = [/\bdeep dive\b/g, /\bin depth\b/g, /\bhands on\b/g, /\bworkshops?\b/g, /\b(?:live )?demonstrations?\b/g, /\btechnical training\b/g];
@@ -379,11 +384,7 @@ export function verifyRecSynthesis(answer, prepared) {
   if (!prepared.validation) return { valid: true };
   const text = canonicalTitle(answer);
   if (prepared.validation.decisionCriteria) {
-    const criteria = [
-      /\b(customer|market|demand|problem|fit)\b/i,
-      /\b(costs?|budget|cash flow|payback|financing terms)\b/i,
-      /\b(risks?|terms|verify|evidence|compare|due diligence|warrant\w*|references)\b/i,
-    ];
+    const criteria = DECISION_CHECKS.map((check) => check.pattern);
     if (!criteria.every((pattern) => pattern.test(answer))) return { valid: false, reason: "missing_decision_criteria" };
     if (!/\b(advice|suggest\w*|recommend\w*|consider|ask|check|verify|assess)\b/i.test(answer)) return { valid: false, reason: "unlabelled_decision_advice" };
   }
@@ -520,6 +521,57 @@ export function renderStructuredComparison(raw, prepared) {
   return { verification, payload: verification.valid ? { answer, sources } : prepared.fallback };
 }
 
+function buildStructuredAdvice(results, packed) {
+  const pending = results.filter((result) => !result.answer);
+  if (pending.length !== 1) return null;
+  const result = pending[0], task = result.task;
+  if (task.kind !== "advice" || !needsDecisionCriteria(task) || !isRepresentativeTask(task) || task.years.length !== 1) return null;
+  // Mixed or comparative requests need more than this three-check evaluation contract.
+  if (/\b(and|also|plus|compare|versus|difference|rank|calculate|estimate|why|explain)\b/i.test(task.question)) return null;
+  const documents = result.documents.filter((doc) => doc.fields && doc.payload.sourceType === "session" &&
+    packed.sources.some((source) => source.sourceType === "session" && source.rowId === doc.payload.rowId));
+  const records = groupedEvidence(documents).filter((group) => group.details).slice(0, 2);
+  if (!records.length) return null;
+  const schema = { type: "object", additionalProperties: false,
+    properties: Object.fromEntries(DECISION_CHECKS.map(({ key }) => [key, { type: "string", minLength: 20, maxLength: 180 }])),
+    required: DECISION_CHECKS.map(({ key }) => key),
+  };
+  const context = JSON.stringify({ request: task.question,
+    scope: { years: task.years, days: task.days, hall: task.hall, interests: task.interests },
+    coverage: "Selected published examples, not a complete programme or commercial endorsement.",
+    records: records.map((record) => ({ title: record.details.title, theme: record.details.theme,
+      descriptionExcerpt: descriptionExcerpt(record.details.preamble || "", task.question, 240) })),
+  });
+  if (context.length + JSON.stringify(schema).length > packed.context.length) return null;
+  return { schema, context, records, year: task.years[0],
+    parts: results.map((part) => part === result ? { advice: true } : { answer: part.answer }),
+  };
+}
+
+export function renderStructuredAdvice(raw, prepared) {
+  const contract = prepared.structuredAdvice;
+  const invalid = (reason) => ({ verification: { valid: false, reason }, payload: prepared.fallback });
+  let data;
+  try { data = JSON.parse(raw); } catch { return invalid("invalid_advice_json"); }
+  if (!contract || !data || Array.isArray(data) || typeof data !== "object" ||
+      Object.keys(data).length !== DECISION_CHECKS.length || DECISION_CHECKS.some(({ key }) => !Object.hasOwn(data, key))) return invalid("invalid_advice_shape");
+  for (const { key, pattern } of DECISION_CHECKS) {
+    const value = data[key];
+    if (typeof value !== "string" || value.trim().length < 20 || value.length > 180 || /[\r\n<>]|https?:\/\//i.test(value)) return invalid("invalid_advice_check");
+    if (!pattern.test(value) || !/\b(check|ask|assess|compare|review|test|request|verify|estimate|calculate|identify|consider|confirm|evaluate|inspect|inquire|enquire|negotiate)\b/i.test(value)) return invalid("missing_actionable_advice");
+    if (/\b(?:conference|event|forum|organi[sz]ers?)\s+(?:offers?|provides?|guarantees?)\b|\b(?:attendee savings|registration prices)\b/i.test(value)) return invalid("event_evaluation_instead_of_business");
+  }
+  const examples = contract.records.map((record) => `- **${record.details.title}**${record.details.theme ? `: ${record.details.theme}` : ""}`).join("\n");
+  const advice = `**General evaluation advice**\nThese checks are suggestions, not published conference promises.\n\n${DECISION_CHECKS.map(({ key, label }) => `- **${label}:** ${data[key].trim()}`).join("\n")}\n\n**Programme context: REC ${contract.year}** (selected published examples)\n${examples}\n\nA sponsor listing or conference participation does not establish commercial suitability.`;
+  const answer = contract.parts.map((part) => part.advice ? advice : part.answer.answer).join("\n\n");
+  const evidence = contract.records.flatMap((record) => record.sources);
+  const sources = uniqueSources([...evidence, ...contract.parts.flatMap((part) => part.answer?.sources || [])]);
+  const verification = verifyRecSynthesis(answer, { ...prepared, validation: { ...prepared.validation,
+    sessionEvidence: evidence.map((source) => ({ title: source.source, text: source.text || "" })),
+  } });
+  return { verification, payload: verification.valid ? { answer, sources } : prepared.fallback };
+}
+
 export async function prepareRecRequest(question, { history = [], signal, snapshot: supplied, maxContextChars = 18000 } = {}) {
   const snapshot = supplied ? snapshotToRuntimeData(supplied) : await getRecPublicSnapshot({ signal });
   const request = resolveRecRequest(question, history, snapshot);
@@ -593,6 +645,7 @@ export async function prepareRecRequest(question, { history = [], signal, snapsh
   } : null;
   return { ...request, direct, coverage, validation, fallback: validation ? buildSynthesisFallback(results, snapshot) : null,
     structuredComparison: requiresSelection ? buildStructuredComparison(results, packed, snapshot) : null,
+    structuredAdvice: decisionCriteria && !requiresSelection ? buildStructuredAdvice(results, packed) : null,
     indexedExclusions: uniqueSources(results.flatMap((r) => r.documents.map((d) => d.payload))).map((s) => `${s.sourceType}:${s.rowId || s.source}`),
     ...packed };
 }

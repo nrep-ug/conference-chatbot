@@ -307,6 +307,23 @@ path as `responseMode: "structured_comparison"` in `request_coverage`; use the
 Ollama event's `inputChars` for the actual model input size. JSON structure improves
 identity reliability but does not prove that free-text advice is correct or fast.
 
+Concise business-evaluation requests use `responseMode: "structured_advice"`.
+The model receives up to two relevant, scoped published session examples and
+returns three short actionable checks: customer/problem fit, costs and financing
+terms, and delivery risks/evidence. The server labels these as general advice,
+renders the published context itself, and preserves any already-answered compound
+parts in their original order. Sponsor names and other resolved facts are not
+sent back to the model for rewriting. Only included public examples contribute
+context sources; they are not endorsements or a complete programme ranking.
+
+This path uses `CHAT_MODEL` and at most 192 generated tokens. Like structured
+comparisons, it skips Qdrant enrichment and validates the full response before
+delivery or caching. Detailed requests, mixed requests within one clause,
+multiple unresolved parts, and missing programme evidence keep broader synthesis
+and the configured Qdrant complement. Structural and wording checks are not a
+complete factual or business-advice verifier; evaluation reports still require
+human review. No additional environment settings or re-ingestion are required.
+
 The machine-readable schema allowlist lives in `src/lib/rec-schema.js`. Update both that file and `docs/conference-schema.md` when the public REC table structure changes.
 
 ## Planner Diagnostics

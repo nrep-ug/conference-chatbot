@@ -11,7 +11,7 @@ import {
 } from "@/lib/chat-conversation";
 import { logChatEvent } from "@/lib/chat-diagnostics";
 import { createSseResponse } from "@/lib/chat-stream";
-import { getEmbedding, askMistral, askStructuredComparison, streamMistral, getAnswerContextBudget } from "@/lib/ollama";
+import { getEmbedding, askMistral, askStructuredComparison, askStructuredAdvice, streamMistral, getAnswerContextBudget } from "@/lib/ollama";
 import { qdrant, QDRANT_COLLECTION } from "@/lib/qdrant";
 import {
   getRecPublicSnapshot,
@@ -19,7 +19,7 @@ import {
 import { retrievePlannedRecContext } from "@/lib/rec-planner";
 import { getPlannerSchemaMarkdown } from "@/lib/rec-schema";
 import { getSnapshotPaths, renderRecSnapshotMarkdown } from "@/lib/rec-snapshot";
-import { prepareRecRequest, verifyRecSynthesis, renderStructuredComparison } from "@/lib/rec-request";
+import { prepareRecRequest, verifyRecSynthesis, renderStructuredComparison, renderStructuredAdvice } from "@/lib/rec-request";
 
 export const runtime = "nodejs";
 
@@ -656,9 +656,9 @@ async function prepareAnswerRequest(question, history, signal, requestId) {
       tasks: prepared.coverage,
       direct: Boolean(prepared.direct),
       contextChars: prepared.context?.length || 0,
-      responseMode: prepared.structuredComparison ? "structured_comparison" : "standard",
+      responseMode: prepared.structuredComparison ? "structured_comparison" : prepared.structuredAdvice ? "structured_advice" : "standard",
     });
-    if (!prepared.direct && !prepared.structuredComparison && QDRANT_COMPLEMENT_ENABLED && contextBudget - prepared.context.length > 750) {
+    if (!prepared.direct && !prepared.structuredComparison && !prepared.structuredAdvice && QDRANT_COMPLEMENT_ENABLED && contextBudget - prepared.context.length > 750) {
       try {
         const complementSignal = AbortSignal.any([signal, AbortSignal.timeout(readInteger("QDRANT_COMPLEMENT_TIMEOUT_MS", 3000))].filter(Boolean));
         const extra = await retrieveContext(prepared.resolvedQuestion, complementSignal, {
@@ -685,6 +685,10 @@ async function prepareAnswerRequest(question, history, signal, requestId) {
 }
 
 async function synthesizeRecAnswer(prepared, { question, history, signal, requestId }) {
+  if (prepared.structuredAdvice) {
+    const raw = await askStructuredAdvice({ ...prepared.structuredAdvice, history, signal, requestId });
+    return renderStructuredAdvice(raw, prepared);
+  }
   if (prepared.structuredComparison) {
     const raw = await askStructuredComparison({ ...prepared.structuredComparison, history, signal, requestId });
     return renderStructuredComparison(raw, prepared);
@@ -774,8 +778,8 @@ async function answerQuestion(question, history, signal, requestId) {
       requestId,
       durationMs: Date.now() - startedAt,
       answerModelMs: Date.now() - answerStartedAt,
-      sourceCount: fullRecContext.sources.length,
-      contextChars: fullRecContext.context.length,
+      sourceCount: payload.sources.length,
+      contextChars: (fullRecContext.structuredAdvice || fullRecContext.structuredComparison || fullRecContext).context.length,
     });
     return payload;
   }

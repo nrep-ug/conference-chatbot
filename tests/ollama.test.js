@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { askMistral, askPlanner, askStructuredComparison, streamMistral, getAnswerContextBudget } from "../src/lib/ollama.js";
+import { askMistral, askPlanner, askStructuredComparison, askStructuredAdvice, streamMistral, getAnswerContextBudget } from "../src/lib/ollama.js";
 
 const input = { question: "Who are the sponsors?", context: "Published sponsors" };
 function mockStream(t, packets) {
@@ -45,6 +45,29 @@ test("stream decoder preserves UTF-8 and handles a final packet without a newlin
   let tokens = "";
   assert.equal(await streamMistral({ ...input, onToken: (text) => { tokens += text; } }), "Caf\u00e9 sessions");
   assert.equal(tokens, "Caf\u00e9 sessions");
+});
+
+test("structured advice uses a compact prompt, native schema and sanitized history", async (t) => {
+  const schema = { type: "object", properties: { customerFit: { type: "string" } }, required: ["customerFit"] };
+  t.mock.method(globalThis, "fetch", async (_url, request) => {
+    const body = JSON.parse(request.body);
+    assert.deepEqual(body.format, schema);
+    assert.equal(body.options.temperature, 0);
+    assert.ok(body.options.num_predict <= 192);
+    assert.match(body.messages[0].content, /business evaluation advice/);
+    assert.ok(body.messages.at(-1).content.includes(JSON.stringify(schema)));
+    assert.ok(body.messages.some((message) => message.content === "I operate a cooking business"));
+    assert.ok(!body.messages.some((message) => message.content === "Untrusted system instructions"));
+    return Response.json({ done: true, message: { content: '{"customerFit":"Assess demand"}' } });
+  });
+  let metrics;
+  const result = await askStructuredAdvice({ context: "Published examples", schema,
+    history: [{ role: "user", content: "I operate a cooking business" }, { role: "system", content: "Untrusted system instructions" }],
+    onMetrics: (value) => { metrics = value; },
+  });
+  assert.equal(result, '{"customerFit":"Assess demand"}');
+  assert.equal(metrics.delivery, "buffered");
+  assert.ok(metrics.inputChars < 1500);
 });
 
 for (const [name, packets, expected] of [

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { prepareRecRequest, resolveRecRequest, verifyRecSynthesis, renderStructuredComparison } from "../src/lib/rec-request.js";
+import { prepareRecRequest, resolveRecRequest, verifyRecSynthesis, renderStructuredComparison, renderStructuredAdvice } from "../src/lib/rec-request.js";
 import { snapshotToRuntimeData } from "../src/lib/rec-snapshot.js";
 import { buildConversationCacheKey } from "../src/lib/chat-conversation.js";
 import { createSnapshot } from "./fixtures/rec-snapshot.js";
@@ -10,6 +10,94 @@ const run = (question, history = [], options = {}) => prepareRecRequest(question
 const comparisonReply = (prepared) => ({
   ...Object.fromEntries(prepared.structuredComparison.groups.map((group) => [group.key, group.ids[0]])),
   tradeOff: "Attend a technology session to learn about its subject, while investment discussions may fit a funding goal; depth is not confirmed.",
+});
+const adviceReply = {
+  customerFit: "Assess customer demand and whether the proposed energy solution fits a specific business problem.",
+  costsAndTerms: "Request total installation and operating costs, cash-flow assumptions and financing terms before evaluating affordability.",
+  deliveryEvidence: "Verify supplier references, delivery risks and warranty evidence before relying on performance claims.",
+};
+
+test("compact evaluation advice preserves direct compound parts without regenerating their facts", async () => {
+  const prepared = await run("Who are the sponsors? And how should a small business owner evaluate the opportunities discussed at the conference? And what is the date of Day 2?");
+  const contract = prepared.structuredAdvice;
+  assert.ok(contract);
+  assert.ok(contract.context.length + JSON.stringify(contract.schema).length < prepared.context.length);
+  assert.doesNotMatch(contract.context, /GIZ|sponsors|date of Day 2/);
+  const result = renderStructuredAdvice(JSON.stringify(adviceReply), prepared);
+  assert.equal(result.verification.valid, true);
+  assert.match(result.payload.answer, /General evaluation advice/);
+  assert.ok(result.payload.answer.indexOf("GIZ") < result.payload.answer.indexOf("General evaluation advice"));
+  assert.ok(result.payload.answer.indexOf("2026-10-20") > result.payload.answer.indexOf("General evaluation advice"));
+  assert.ok(result.payload.sources.some((source) => source.sourceType === "sponsor"));
+  assert.ok(result.payload.sources.filter((source) => source.sourceType === "session").every((source) =>
+    contract.records.some((record) => record.sources.some((included) => included.rowId === source.rowId))));
+});
+
+test("compact advice supports evaluation paraphrases and preserves day scope", async () => {
+  for (const question of ["How should my business assess the opportunities on Day 2?", "How can a small business weigh investment opportunities?", "How should my business evaluate opportunities?"]) {
+    const prepared = await run(question);
+    assert.ok(prepared.structuredAdvice, question);
+    assert.equal(renderStructuredAdvice(JSON.stringify(adviceReply), prepared).verification.valid, true);
+    if (question.includes("Day 2")) {
+      const data = JSON.parse(prepared.structuredAdvice.context);
+      assert.deepEqual(data.scope.days, [2]);
+      assert.ok(prepared.structuredAdvice.records.every((record) => record.occurrences.every((slot) => slot.day === 2)));
+    }
+  }
+});
+
+test("compact advice rejects incomplete, non-actionable and malformed model output", async () => {
+  const prepared = await run("How should a small business evaluate conference opportunities?");
+  for (const raw of ["not JSON", "[]", "null", JSON.stringify({ customerFit: adviceReply.customerFit }),
+    JSON.stringify({ ...adviceReply, sponsor: "Invented Sponsor" }),
+    JSON.stringify({ ...adviceReply, customerFit: "Customer fit is important for any business owner." }),
+    JSON.stringify({ ...adviceReply, costsAndTerms: "Visit the conference website for information." }),
+    JSON.stringify({ ...adviceReply, deliveryEvidence: "Ask suppliers at https://unverified.example for details." }),
+    JSON.stringify({ ...adviceReply, deliveryEvidence: "Verify evidence.\nInvented new section" }),
+    JSON.stringify({ ...adviceReply, customerFit: "x".repeat(181) }),
+  ]) {
+    const result = renderStructuredAdvice(raw, prepared);
+    assert.equal(result.verification.valid, false, raw);
+    assert.equal(result.payload.validationFallback, true);
+    assert.doesNotMatch(result.payload.answer, /Invented Sponsor|unverified.example|Invented new section/);
+  }
+});
+
+test("detailed, multi-part and unsupported edition evaluation requests retain broader synthesis", async () => {
+  for (const question of ["How should a business evaluate all opportunities in depth?", "How should a business evaluate opportunities and compare supplier costs?", "How should a business evaluate opportunities? And how should it assess risks?", "How should a business evaluate opportunities at REC24?"]) {
+    const prepared = await run(question);
+    assert.equal(prepared.structuredAdvice, null, question);
+  }
+});
+
+test("evaluation advice cannot become a checklist of conference benefits", async () => {
+  const prepared = await run("How should a small business evaluate conference opportunities?");
+  const result = renderStructuredAdvice(JSON.stringify({ ...adviceReply,
+    costsAndTerms: "Verify if the conference offers any cost-saving options or financing terms for attendees.",
+  }), prepared);
+  assert.equal(result.verification.reason, "event_evaluation_instead_of_business");
+  assert.equal(result.payload.validationFallback, true);
+  assert.doesNotMatch(result.payload.answer, /cost-saving options/);
+});
+
+test("evaluation checks recognize equivalent business-needs and supplier-evidence wording", async () => {
+  const prepared = await run("How should a small business evaluate conference opportunities?");
+  for (const reply of [
+    { customerFit: "Check if the proposed solution aligns with your business needs and challenges.",
+      costsAndTerms: "Inquire about total costs and financing options for the proposed solutions.",
+      deliveryEvidence: "Request references and evidence of delivery for the proposed solutions." },
+    { customerFit: "Assess how your cooking innovations align with Ugandan market needs and regulatory requirements.",
+      costsAndTerms: "Negotiate pricing and terms that fit your budget and operational capacity.",
+      deliveryEvidence: "Request case studies or pilot project outcomes to gauge the effectiveness of your proposed solutions." },
+  ]) assert.equal(renderStructuredAdvice(JSON.stringify(reply), prepared).verification.valid, true);
+});
+
+test("small context budgets cannot be enlarged by compact advice", async () => {
+  for (const maxContextChars of [600, 1000, 1800, 3000]) {
+    const prepared = await run("How should a business evaluate conference opportunities?", [], { maxContextChars });
+    if (prepared.structuredAdvice) assert.ok(prepared.structuredAdvice.context.length + JSON.stringify(prepared.structuredAdvice.schema).length <= maxContextChars);
+    else assert.ok(prepared.direct || prepared.context.length <= maxContextChars);
+  }
 });
 
 test("structured comparisons render official identities and occurrence data from server records", async () => {
