@@ -55,6 +55,24 @@ test("reserves more context space for a longer conversation", () => {
   assert.ok(long >= 0);
 });
 
+test("output budgets follow the question, not words copied from source descriptions", async (t) => {
+  for (const [key, value] of Object.entries({ CHAT_NUM_PREDICT: "360", CHAT_MAX_NUM_PREDICT: "1024" })) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+  }
+  const limits = [];
+  t.mock.method(globalThis, "fetch", async (_url, request) => {
+    const body = JSON.parse(request.body);
+    limits.push(body.options.num_predict);
+    return Response.json({ done: true, message: { content: "Complete response" } });
+  });
+  await askMistral({ question: "Compare two sessions", context: "REQUEST 1: Compare sessions\nDescription: explain every technology in depth" });
+  await askMistral({ question: "Who are the sponsors and how should I evaluate opportunities?", context: "REQUEST 1: Sponsors\nREQUEST 2: Evaluate opportunities" });
+  await askMistral({ question: "Compare all sessions in depth", context: "REQUEST 1: Sessions" });
+  assert.deepEqual(limits, [360, 360, 768]);
+});
+
 test("reports model stage timings and counts without prompt or answer contents", async (t) => {
   t.mock.method(globalThis, "fetch", async () => Response.json({ done: true, done_reason: "stop", message: { content: "Published sponsors" },
     load_duration: 1200000000, prompt_eval_duration: 5000000000, eval_duration: 2000000000, total_duration: 8300000000,

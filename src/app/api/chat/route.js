@@ -1010,11 +1010,11 @@ function streamAnswer(question, history, parentSignal, requestId) {
 
           if (fullRecContext.confident) {
             if (fullRecContext.validation) {
-              // Hold selection claims until their session identity checks pass.
+              // Validate selection and decision advice before exposing generated claims.
               const answer = await askMistral({ question, context: fullRecContext.context, history, signal, requestId });
               const verification = verifyRecSynthesis(answer, fullRecContext);
               const payload = verification.valid ? { answer, sources: fullRecContext.sources } : fullRecContext.fallback;
-              setCachedAnswer(question, payload, history);
+              if (verification.valid) setCachedAnswer(question, payload, history);
               writeEvent(controller, encoder, "sources", payload.sources);
               writeEvent(controller, encoder, "token", payload.answer);
               writeEvent(controller, encoder, "done", { cached: false, validationFallback: Boolean(payload.validationFallback) });

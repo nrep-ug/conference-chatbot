@@ -281,7 +281,7 @@ Both JSON and streaming requests use the same request preparation in `src/lib/re
 
 The planner requests JSON and rejects unknown tables and invented text filters. It joins session lookups to daily themes and reports both matched and included row counts; partial or empty operations are not treated as complete retrievals.
 
-Official facts must come from the supplied evidence. Advice must be identified as advice. Finance recommendations cite terms present in published fields and flag overlapping sessions. `CHAT_NUM_PREDICT` is the base output budget; compound and comparative answers can expand up to `CHAT_MAX_NUM_PREDICT` (default 1024). Empty, interrupted, and token-limited model responses produce an explicit error and are never cached as finished answers. A changed snapshot file invalidates answer-cache keys.
+Official facts must come from the supplied evidence. Advice must be identified as advice. Finance recommendations cite terms present in published fields and flag overlapping sessions. `CHAT_NUM_PREDICT` is the base output budget; larger compound or explicitly detailed answers can expand up to `CHAT_MAX_NUM_PREDICT` (default 1024). Source descriptions containing words like "explain" or "in depth" no longer inflate that budget. Ordinary answers target 120 words; explicit requests for detail or complete lists are not subject to that target. Empty, interrupted, and token-limited model responses produce an explicit error and are never cached as finished answers. A changed snapshot file invalidates answer-cache keys.
 
 Model-backed session selections are buffered until session-identity checks pass.
 The checks reject daily themes presented as session names and answers missing
@@ -305,7 +305,7 @@ The app writes one-line JSON diagnostic events to stdout, which PM2 captures. Us
 - `request_start`
 - `request_coverage` (per-part intent, edition, days, direct/synthesis status and candidate record count)
 - `request_complement_unavailable` (optional enrichment failed or timed out)
-- `ollama_request_start`, `ollama_request_done`, `ollama_request_error` (model name, input size, context/output limits, loading, prompt evaluation and generation timings)
+- `ollama_request_start`, `ollama_request_done`, `ollama_request_error` (model name, input size, context/output limits, requested `numThread`, loading, prompt evaluation and generation timings)
 - `ollama_first_content` (generation has started, including for buffered/validated answers)
 - `answer_direct_appwrite`
 - `planner_executed`
@@ -488,11 +488,26 @@ recommended sessions alone no longer passes the business-evaluation question.
 Cached responses are counted separately; restart the chatbot before an uncached
 benchmark. Repeating cached prompts does not measure model inference speed.
 
+Decision-advice requests are also checked before the API exposes or caches them:
+the answer must preserve requested sponsors and address customer fit, costs/terms,
+and risks/evidence. Selection validation also rejects detected unqualified depth or
+format claims (such as "deep dive" or "hands-on workshop") without supporting
+evidence for the named session. These are targeted checks, not a semantic proof of quality.
+An invalid answer produces a marked, uncached fallback in both JSON and SSE modes.
+Review whether the advice actually evaluates business proposals rather than only
+the usefulness of attending sessions.
+
 Explicit session-topic lookups check titles, themes, descriptions, organizers and
 speaker fields in the scoped public snapshot. A no-match answer is limited to an
 explicit phrase not being found; it does not claim the subject cannot be discussed.
 Comparisons and business advice use a bounded set of representative session titles;
-identical details share occurrence slots, while differing speakers/descriptions
+comparison evidence names each requested topic and distinguishes matches in session
+fields from relevance inferred only from a daily theme. Long descriptions use
+labelled sentence excerpts for concise requests; full source records remain available
+in citations. Explicitly detailed or exhaustive requests retain full descriptions
+subject to the context budget. Intended audiences must not be treated as confirmed
+speakers, and title-only evidence cannot establish comparative technical depth.
+Identical details share occurrence slots, while differing speakers/descriptions
 stay separate. Exhaustive requests retain the larger evidence budget and partial
 coverage warnings. Qdrant complements skip database records already considered and
 must carry an edition `year` matching the request, preventing unrelated editions

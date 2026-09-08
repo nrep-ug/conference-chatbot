@@ -172,6 +172,40 @@ test("business evaluation gets session evidence rather than irrelevant timetable
   assert.match(result.context, /GIZ Uganda/);
   assert.match(result.context, /Renewable Energy Investment Forum/);
   assert.doesNotMatch(result.context, /Record type: program_time_block/);
+  assert.match(result.context, /Advice required:.*customer\/problem fit.*costs.*risks/);
+  assert.equal(result.validation.decisionCriteria, true);
+  const weak = "GIZ Uganda is a partner. Attend Renewable Energy Investment Forum, assess speaker expertise and network. Consider conference costs and ask for specific project information.";
+  assert.equal(verifyRecSynthesis(weak, result).reason, "missing_decision_criteria");
+  const valid = "GIZ Uganda is a partner. My advice: check customer demand and business fit; request total costs and financing terms; verify delivery risks and supplier evidence.";
+  assert.equal(verifyRecSynthesis(valid, result).valid, true);
+  assert.equal(verifyRecSynthesis(valid.replace("GIZ Uganda", "An organization"), result).reason, "missing_requested_sponsor");
+  assert.equal(result.fallback.validationFallback, true);
+  assert.match(result.fallback.answer, /General evaluation advice, not published conference claims/);
+});
+
+test("assessment paraphrases retain the decision task instead of becoming session recommendations", async () => {
+  for (const question of ["How can my business assess investment opportunities?", "Help me weigh project opportunities for my business", "How should I decide which investment opportunities suit my business?"]) {
+    const result = await run(question);
+    assert.equal(result.direct, null, question);
+    assert.equal(result.validation.decisionCriteria, true, question);
+    assert.equal(verifyRecSynthesis("Attend Renewable Energy Investment Forum.", result).valid, false);
+  }
+});
+
+test("excerpted context preserves exact identity fields and labels omitted description details", async () => {
+  const snapshot = createSnapshot();
+  const session = snapshot.sessions.find((s) => s.$id === "investment-day-2");
+  session.preamble = "Unrelated introductory material. ".repeat(80) + "Investment discussion covers financing terms and delivery risks. No investment returns are guaranteed.";
+  const compact = await run("Compare technology and investment sessions", [], { snapshot });
+  assert.match(compact.context, /Investment discussion covers financing terms/);
+  assert.match(compact.context, /Excerpts only; omitted details may exist/);
+  assert.match(compact.context, /"comparisonTopics":\["technology"\]/);
+  assert.match(compact.context, /"comparisonTopics":\["investment"\]/);
+  assert.ok(compact.context.length < 5500);
+  assert.ok(compact.sources.some((s) => s.rowId === session.$id && s.text.includes(session.preamble)));
+  const detailed = await run("Compare all technology and investment sessions in depth", [], { snapshot });
+  assert.ok(detailed.context.includes(session.preamble));
+  assert.match(detailed.context, /"comparisonTopics":\["investment"\]/);
 });
 
 test("representative comparisons retain both topics and do not fill the budget with one topic", async () => {
@@ -207,6 +241,16 @@ test("preserves later task evidence under a small context budget", async () => {
   assert.match(result.context, /Partial evidence/);
   assert.ok(result.context.length <= 2600);
   assert.ok(result.sources.every((s) => result.context.includes(s.source)));
+});
+
+test("task instructions cannot overflow a constrained compound context budget", async () => {
+  const question = Array(8).fill("How should my business evaluate investment opportunities for suitable customer projects with costs and risks?").join(" And ");
+  for (const maxContextChars of [4100, 5000, 9000]) {
+    const result = await run(question, [], { maxContextChars });
+    assert.ok(result.direct || result.context.length <= maxContextChars);
+    if (result.direct) assert.match(result.direct.answer, /fewer parts/);
+    else assert.match(result.context, /REQUEST 8:/);
+  }
 });
 
 test("unpublished editions never silently switch to the active conference", async () => {
@@ -273,6 +317,24 @@ test("rejects synthesized session identities that are only day themes", async ()
   assert.match(prepared.fallback.answer, /could not verify/);
   assert.doesNotMatch(prepared.fallback.answer, /Technology & Innovation session/);
   assert.ok(prepared.fallback.sources.every((s) => s.sourceType === "session"));
+});
+
+test("named sessions cannot acquire unlisted depth or format claims", async () => {
+  const prepared = await run("Compare technology and investment sessions");
+  for (const detail of ["a deep dive into technology", "an in-depth workshop", "hands-on demonstrations", "technical training"]) {
+    const answer = `Clean Cooking Technology Forum offers ${detail}. Renewable Energy Investment Forum covers finance.`;
+    assert.equal(verifyRecSynthesis(answer, prepared).reason, "unverified_session_detail", detail);
+  }
+  const qualified = "Clean Cooking Technology Forum: technical training is not confirmed. Renewable Energy Investment Forum: its depth is unknown.";
+  assert.equal(verifyRecSynthesis(qualified, prepared).valid, true);
+});
+
+test("published format evidence belongs to its own session, not another named session", async () => {
+  const snapshot = createSnapshot();
+  snapshot.sessions.find((s) => s.$id === "investment-day-2").preamble = "A hands-on workshop for investment planning.";
+  const prepared = await run("Compare technology and investment sessions", [], { snapshot });
+  assert.equal(verifyRecSynthesis("Clean Cooking Technology Forum is listed. Renewable Energy Investment Forum offers a hands-on workshop.", prepared).valid, true);
+  assert.equal(verifyRecSynthesis("Renewable Energy Investment Forum is listed. Clean Cooking Technology Forum offers a hands-on workshop.", prepared).reason, "unverified_session_detail");
 });
 
 test("no session evidence cannot validate invented archive comparisons", async () => {

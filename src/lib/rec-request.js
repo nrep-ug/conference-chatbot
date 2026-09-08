@@ -140,6 +140,7 @@ function hasUnparsedConjunction(text) {
 function safeDirectTask(task) {
   const text = norm(task.question);
   if (!task.kind) return false;
+  if (task.kind === "advice" || needsDecisionCriteria(task)) return false;
   if (/\b(not what|didn't|did not|wrong|incorrect|doesn't|does not|not helpful|not useful|missed|you forgot)\b/.test(text)) return false;
   if (task.kind === "date" && task.sessionIds.length > 1) return false;
   // These need synthesis, comparison, or facts not covered by the simple lookups.
@@ -217,7 +218,13 @@ function taskDocuments(task, bundle) {
       (norm(doc.fields?.preamble).includes(word) ? 2 : 0) +
       (norm(days[Number(doc.fields?.day) - 1]?.theme).includes(word) ? 1 : 0), 0));
     const best = Math.max(...scores);
-    return { ...doc, comparisonTopics: doc.fields && best > 0 ? topics.filter((_, index) => scores[index] === best) : [], scores };
+    const comparisonTopics = doc.fields && best > 0 ? topics.filter((_, index) => scores[index] === best) : [];
+    const comparisonBasis = comparisonTopics.map((topic) => {
+      const words = topic.match(/[\p{L}\p{N}]{4,}/gu) || [];
+      const explicit = words.some((word) => norm([doc.fields?.title, doc.fields?.theme, doc.fields?.preamble].join(" ")).includes(word));
+      return `${topic}: ${explicit ? "published session fields" : "daily theme only; subject relevance is an inference"}`;
+    });
+    return { ...doc, comparisonTopics, comparisonBasis, scores };
   });
   const preferred = [];
   for (const [index, topic] of topics.entries()) {
@@ -234,6 +241,36 @@ function taskDocuments(task, bundle) {
   return [...new Set([...preferred, ...scored])];
 }
 
+function isRepresentativeTask(task) {
+  return (task.kind === "advice" || /\b(compare|comparison|versus)\b/i.test(task.question)) &&
+    !/\b(all|every|each|exhaustive|complete list|in.depth|detailed)\b/i.test(task.question);
+}
+
+function needsDecisionCriteria(task) {
+  return /\b(evaluate|assess|weigh|decide|decision)\b/i.test(task.question) &&
+    /\b(opportunities|business|investment|projects?|financ\w*)\b/i.test(task.query);
+}
+
+function descriptionExcerpt(text, question, maxChars = 550) {
+  if (text.length <= maxChars) return text;
+  const terms = norm(question).match(/[\p{L}\p{N}]{4,}/gu) || [];
+  const segments = [...new Intl.Segmenter("en", { granularity: "sentence" }).segment(text)];
+  const ranked = segments.map(({ segment, index }) => ({ segment: segment.trim(), index,
+    score: terms.filter((term) => norm(segment).includes(term)).length }))
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const selected = [];
+  let used = 0;
+  for (const row of ranked) {
+    if (used + row.segment.length + 1 > maxChars) continue;
+    selected.push(row);
+    used += row.segment.length + 1;
+    if (selected.length === 2) break;
+  }
+  if (selected.length) return selected.sort((a, b) => a.index - b.index).map((row) => row.segment).join(" [... omitted ...] ");
+  const prefix = ranked[0].segment.slice(0, maxChars - 4);
+  return `${prefix.slice(0, prefix.lastIndexOf(" "))} ...`;
+}
+
 function groupedEvidence(documents) {
   const groups = new Map();
   for (const doc of documents) {
@@ -244,14 +281,19 @@ function groupedEvidence(documents) {
     const { day, startTime, endTime, hall, ...details } = doc.fields;
     // Only identical published details share a group; never move speakers/descriptions between different sessions.
     const key = JSON.stringify([doc.payload.conferenceId, details]);
-    const group = groups.get(key) || { details, occurrences: [], sources: [] };
+    const group = groups.get(key) || { details, occurrences: [], sources: [], comparisonTopics: [], comparisonBasis: [] };
     group.occurrences.push({ day, startTime, endTime, hall });
     group.sources.push(doc.payload);
+    group.comparisonTopics.push(...(doc.comparisonTopics || []));
+    group.comparisonBasis.push(...(doc.comparisonBasis || []));
     groups.set(key, group);
   }
   return [...groups.values()].map((group) => ({
     ...group,
-    text: group.text || `Record type: session\n${JSON.stringify({ ...group.details, occurrences: group.occurrences })}`,
+    text: group.text || `Record type: session\n${JSON.stringify({ ...group.details,
+      ...(group.comparisonTopics.length ? { comparisonTopics: [...new Set(group.comparisonTopics)] } : {}),
+      ...(group.comparisonBasis.length ? { comparisonBasis: [...new Set(group.comparisonBasis)] } : {}),
+      occurrences: group.occurrences })}`,
   }));
 }
 
@@ -261,23 +303,36 @@ function buildTaskContext(results, maxChars) {
   const sources = [];
   const budget = Math.floor(Math.max(0, maxChars - 500) / Math.max(1, results.length));
   for (const result of results) {
+    const representative = isRepresentativeTask(result.task);
+    const topics = [...new Set(result.documents.flatMap((d) => d.comparisonTopics || []))];
     const label = result.task.question.length > 240 ? `${result.task.question.slice(0, 237)}...` : result.task.question;
     const header = `REQUEST ${result.task.id}: ${label}\nScope: REC ${result.task.years.join(", ")}; days ${result.task.days.join(", ") || "all"}; hall ${result.task.hall || "any"}.\n`;
-    let section = header;
+    const instructions = [
+      topics.length ? `Compare EACH topic: ${topics.join(" versus ")}. Choose one exact session title tagged for each topic; explain the trade-off in subject focus. Tags are search relevance, NOT official tracks. Title-only or daily-theme evidence cannot establish more/less technical depth or investment access.\n` : "",
+      needsDecisionCriteria(result.task) ? "Advice required: evaluate BUSINESS PROPOSALS, not which sessions to attend. Give three short actionable checks: customer/problem fit; total costs and financing terms; delivery risks and evidence to request from providers. Label these as advice, not conference facts. Networking tips alone are insufficient.\n" : "",
+    ].join("");
+    let section = header + instructions;
     const verified = result.answer ? `Verified answer material:\n${result.answer.answer}\nSource records: ${result.answer.sources.map((s) => s.source).join("; ")}` : "";
-    if (verified && header.length + verified.length <= budget) {
+    if (verified && section.length + verified.length <= budget) {
       section += verified;
       sources.push(...result.answer.sources);
     } else {
       let included = 0;
-      const representative = (result.task.kind === "advice" || /\bcompare\b/i.test(result.task.question)) &&
-        !/\b(all|every|each|exhaustive|complete list)\b/i.test(result.task.question);
       const sessionTitles = new Set();
       let otherRecords = 0;
       for (const group of groupedEvidence(result.documents)) {
         const title = group.details ? canonicalTitle(group.details.title) : null;
         if (representative && (title ? !sessionTitles.has(title) && sessionTitles.size >= 4 : otherRecords >= 2)) continue;
-        const row = `${group.text}\n\n`;
+        if (representative && !title) continue;
+        let row = `${group.text}\n\n`;
+        if (representative && group.details) {
+          const preamble = descriptionExcerpt(group.details.preamble || "", result.task.question);
+          row = `Record type: session\n${JSON.stringify({ ...group.details, preamble,
+            ...(preamble !== group.details.preamble ? { descriptionCoverage: "Excerpts only; omitted details may exist." } : {}),
+            ...(group.comparisonTopics.length ? { comparisonTopics: [...new Set(group.comparisonTopics)] } : {}),
+            ...(group.comparisonBasis.length ? { comparisonBasis: [...new Set(group.comparisonBasis)] } : {}),
+            occurrences: group.occurrences })}\n\n`;
+        }
         if (section.length + row.length + 120 > budget) continue;
         section += row;
         included += group.sources.length;
@@ -289,14 +344,56 @@ function buildTaskContext(results, maxChars) {
     }
     sections.push(section);
   }
-  return { context: `Answer EVERY numbered request below in order. Separate facts from advice; no unrequested overview. Schema: conference_day records are daily THEMES, not sessions. program_time_block records are timetable blocks, not named sessions. Only session records define named sessions and their own times, halls and speakers. Use exact session titles; never attach a day theme or generic block time to an invented session.\n\n${sections.join("\n\n")}`, sources: uniqueSources(sources) };
+  return { context: `Answer EVERY numbered request in order. Separate facts from advice; no unrequested overview. Schema: conference_day records are daily THEMES, not sessions; program_time_block records are timetable blocks. Use exact session titles and their own times, halls and speaker fields.\n\n${sections.join("\n\n")}`, sources: uniqueSources(sources) };
 }
 
 const canonicalTitle = (text) => norm(text).replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
+function hasUnsupportedSessionDetail(answer, evidence) {
+  const features = [/\bdeep dive\b/g, /\bin depth\b/g, /\bhands on\b/g, /\bworkshops?\b/g, /\b(?:live )?demonstrations?\b/g, /\btechnical training\b/g];
+  let previousTitle = null;
+  for (const line of answer.split("\n")) {
+    for (const { segment } of new Intl.Segmenter("en", { granularity: "sentence" }).segment(line)) {
+      const text = canonicalTitle(segment);
+      const mentions = evidence.flatMap((record) => {
+        const aliases = [canonicalTitle(record.title), canonicalTitle(record.title).replace(/\btbc\b/g, "").trim()];
+        return aliases.filter((alias) => alias.length > 6 && text.includes(alias)).map((alias) => ({ title: record.title, index: text.indexOf(alias) }));
+      }).sort((a, b) => a.index - b.index);
+      const qualified = /\b(not|no|unconfirmed|unknown|cannot|could not|may|might|whether|ask|request|check|verify|confirm)\b/.test(text);
+      for (const feature of features) {
+        for (const match of text.matchAll(feature)) {
+          if (qualified) continue;
+          const title = mentions.filter((entry) => entry.index <= match.index).at(-1)?.title || mentions[0]?.title || previousTitle;
+          const supporting = evidence.filter((record) => record.title === title);
+          const claim = new RegExp(`\\b${match[0].replace(/s$/, "")}s?\\b`);
+          if (!supporting.some((record) => claim.test(canonicalTitle(record.text)))) return true;
+        }
+      }
+      previousTitle = mentions.at(-1)?.title || previousTitle;
+    }
+  }
+  return false;
+}
+
 export function verifyRecSynthesis(answer, prepared) {
   if (!prepared.validation) return { valid: true };
   const text = canonicalTitle(answer);
+  if (prepared.validation.decisionCriteria) {
+    const criteria = [
+      /\b(customer|market|demand|problem|fit)\b/i,
+      /\b(costs?|budget|cash flow|payback|financing terms)\b/i,
+      /\b(risks?|terms|verify|evidence|compare|due diligence|warrant\w*|references)\b/i,
+    ];
+    if (!criteria.every((pattern) => pattern.test(answer))) return { valid: false, reason: "missing_decision_criteria" };
+    if (!/\b(advice|suggest\w*|recommend\w*|consider|ask|check|verify|assess)\b/i.test(answer)) return { valid: false, reason: "unlabelled_decision_advice" };
+  }
+  for (const sponsor of prepared.validation.requiredSponsors || []) {
+    if (!text.includes(canonicalTitle(sponsor))) return { valid: false, reason: "missing_requested_sponsor" };
+  }
+  if (hasUnsupportedSessionDetail(answer, prepared.validation.sessionEvidence || [])) {
+    return { valid: false, reason: "unverified_session_detail" };
+  }
+  if (!prepared.validation.requireSessions) return { valid: true };
   const titles = [...new Set(prepared.validation.titles.map(canonicalTitle))];
   if (titles.length === 0) return { valid: false, reason: "no_published_session_evidence" };
   const matched = titles.filter((title) => title && text.includes(title));
@@ -341,7 +438,8 @@ function buildSynthesisFallback(results, snapshot) {
       sources.push(doc.payload);
       return `- **${session.title}**: Day ${session.day}, ${time(session.startTime)}-${time(session.toTime)} Kampala time, ${session.venueHall || "hall not listed"}.${session.theme ? ` Published theme: ${session.theme}.` : ""}`;
     }).filter(Boolean);
-    answers.push(`**${result.task.question}**\n\n${lines.length ? "I can confirm these published records, but could not verify a reliable comparison or recommendation beyond their listed details. These are examples, not a complete ranking.\n" + lines.join("\n") : "I could not verify a complete answer to this part from the supplied conference materials."}`);
+    const advice = needsDecisionCriteria(result.task) ? "\n\n**General evaluation advice, not published conference claims:**\n- Check customer demand and whether the solution fits your business problem.\n- Request total installation and operating costs, cash-flow assumptions and financing terms.\n- Verify supplier references, delivery risks, warranties and evidence behind performance claims. Conference participation does not establish commercial suitability." : "";
+    answers.push(`**${result.task.question}**\n\n${lines.length ? "I can confirm these published records, but could not verify a reliable comparison or recommendation beyond their listed details. These are examples, not a complete ranking.\n" + lines.join("\n") : "I could not verify a complete answer to this part from the supplied conference materials."}${advice}`);
   }
   return { answer: answers.join("\n\n"), sources: uniqueSources(sources), validationFallback: true };
 }
@@ -377,8 +475,12 @@ export async function prepareRecRequest(question, { history = [], signal, snapsh
   const coverage = results.map(({ task, answer, documents, topicLookup }) => ({ id: task.id, kind: task.kind || "synthesis", years: task.years, days: task.days, status: answer ? "direct" : documents.length ? "needs_synthesis" : "no_published_evidence", records: documents.length,
     ...(topicLookup ? { topic: topicLookup.topic, searchedSessions: topicLookup.searched, matchingSessions: topicLookup.matches.length } : {}) }));
   const complete = results.length > 0 && results.every((r) => r.answer);
+  const contextLimitResponse = { ...request, coverage, direct: {
+    answer: "Please ask fewer parts at a time so each can fit within the available model context.",
+    sources: [], retrievalPolicy: { qdrantComplement: false },
+  } };
   if (!complete && maxContextChars < results.length * 450 + 500) {
-    return { ...request, coverage, direct: { answer: "Please ask fewer parts at a time so each can fit within the available model context.", sources: [], retrievalPolicy: { qdrantComplement: false } } };
+    return contextLimitResponse;
   }
   const direct = complete ? {
     answer: [...new Set(results.map((r) => r.answer.answer))].join("\n\n"),
@@ -386,9 +488,11 @@ export async function prepareRecRequest(question, { history = [], signal, snapsh
     retrievalPolicy: { qdrantComplement: false },
   } : null;
   const requiresSelection = !direct && request.tasks.some((t) => (t.kind === "sessions" && /\b(compare|comparison|versus)\b/i.test(t.question)) || t.kind === "recommendation");
+  const decisionCriteria = !direct && request.tasks.some(needsDecisionCriteria);
   const selectedYears = new Set(request.tasks.flatMap((t) => t.years));
   const bundles = [snapshot, ...(snapshot.pastConferences || [])].filter((b) => selectedYears.has(Number(b.conference.year)));
   const packed = buildTaskContext(results, maxContextChars);
+  if (!complete && packed.context.length > maxContextChars) return contextLimitResponse;
   const titles = [...new Set(packed.sources.filter((source) => source.sourceType === "session").map((source) => source.source))];
   const dayThemes = bundles.flatMap((bundle) => {
     try {
@@ -396,7 +500,12 @@ export async function prepareRecRequest(question, { history = [], signal, snapsh
       return Array.isArray(days) ? days.map((day) => day.theme).filter(Boolean) : [];
     } catch { return []; }
   });
-  const validation = requiresSelection ? {
+  const validation = requiresSelection || decisionCriteria ? {
+    requireSessions: requiresSelection,
+    decisionCriteria,
+    requiredSponsors: results.filter((r) => ["sponsors", "partners"].includes(r.task.kind) && r.answer)
+      .flatMap((r) => r.answer.sources.filter((s) => s.sourceType === "sponsor").map((s) => s.source)),
+    sessionEvidence: packed.sources.filter((s) => s.sourceType === "session").map((s) => ({ title: s.source, text: s.text || "" })),
     titles,
     dayThemes,
     comparisonGroups: results.flatMap((result) => {
@@ -406,7 +515,7 @@ export async function prepareRecRequest(question, { history = [], signal, snapsh
     }),
     minTitles: Math.min(titles.length, request.tasks.some((t) => /\b(compare|comparison|versus)\b/i.test(t.question)) ? 2 : 1),
   } : null;
-  return { ...request, direct, coverage, validation, fallback: requiresSelection ? buildSynthesisFallback(results, snapshot) : null,
+  return { ...request, direct, coverage, validation, fallback: validation ? buildSynthesisFallback(results, snapshot) : null,
     indexedExclusions: uniqueSources(results.flatMap((r) => r.documents.map((d) => d.payload))).map((s) => `${s.sourceType}:${s.rowId || s.source}`),
     ...packed };
 }
