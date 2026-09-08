@@ -447,15 +447,28 @@ coverage, unpublished data, recommendations, planner validation, Unicode cache
 keys, and simulated interrupted/token-limited model responses without Ollama.
 
 Start the application, then run `npm run eval:chat`. It checks both JSON and SSE
-responses against the local public snapshot. To target a different deployment:
+responses against the local public snapshot. By default it targets
+`http://127.0.0.1:<PORT>/api/chat`, using `PORT` loaded from `.env.local` (3000 if
+unset). An explicit `--base-url` takes precedence. To target a different deployment:
 
 ```bash
 npm run eval:chat -- --base-url https://your-chatbot.example.org --models
 npm run eval:chat -- --models --only Compare
 ```
 
+The evaluator prints the target endpoint and waits up to 30 seconds for the chat
+route to become ready after a PM2 reload. The readiness probe submits invalid input
+to check the API validation contract without invoking a model or warming the answer
+cache. Override that startup deadline with `--ready-timeout-ms 60000`; it is separate
+from the per-question timeout and latency thresholds. If readiness fails, evaluation
+stops with a nonzero exit code and writes an aborted `stage: "preflight"` report
+with no question results. An `ECONNREFUSED` here means the HTTP endpoint could not
+be reached, not that the chatbot answered incorrectly. Check the printed port,
+`PORT` in `.env.local`, and `pm2 logs rec-expo-chatbot --lines 60 --nostream`.
+PM2 showing `online` alone does not establish that the HTTP route is ready.
+
 The snapshot used by the evaluator must match that deployment. Results are saved incrementally
-under `logs/chat-evaluation-*.json`, including answers, source references, first
+under `logs/chat-evaluation-*.json`, including the endpoint, preflight status, answers, source references, first
 token timings (streaming only), total latency, partial failed responses and failed assertions. Model cases
 are marked for human review: keyword assertions do not prove factual accuracy or
 recommendation quality. Review unsupported claims, omitted question parts and

@@ -1,11 +1,66 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
+import { validateChatQuestion } from "../src/lib/chat-conversation.js";
 import { readGeneratedRecSnapshot, snapshotToRuntimeData } from "../src/lib/rec-snapshot.js";
+
+export function resolveEvaluationEndpoint(baseUrl, env = process.env) {
+  if (!baseUrl) {
+    const port = env.PORT || "3000";
+    if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
+      throw new Error("PORT must be an integer from 1 to 65535, or specify --base-url");
+    }
+    baseUrl = `http://127.0.0.1:${port}`;
+  }
+  const url = new URL(baseUrl);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new Error("--base-url must be an HTTP(S) URL without embedded credentials");
+  }
+  return new URL("/api/chat", url).href;
+}
 
 export function evaluationError(error) {
   const errorCode = error.cause?.code || (typeof error.code === "string" ? error.code : error.name) || "Error";
   return { error: `${error.message} (${errorCode})`, errorCode };
+}
+
+export async function waitForChatApi(endpoint, { timeoutMs = 30000, pollIntervalMs = 1000, fetchImpl = fetch } = {}) {
+  const start = performance.now();
+  let attempts = 0;
+  let lastError;
+  do {
+    attempts += 1;
+    let retry = true;
+    try {
+      // Invalid input exercises the chat route without retrieval, inference or cache warming.
+      const response = await fetchImpl(endpoint, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: null }), redirect: "manual",
+        signal: AbortSignal.timeout(Math.max(1, Math.ceil(Math.min(3000, timeoutMs - (performance.now() - start))))),
+      });
+      retry = response.status >= 500 || response.status === 429;
+      if (response.status === 400) {
+        const body = await response.json();
+        if (body.error === validateChatQuestion(null).error && response.headers.get("x-request-id")) {
+          return { status: "ready", attempts, durationMs: Math.round(performance.now() - start) };
+        }
+      } else {
+        await response.body?.cancel();
+      }
+      throw new Error(`HTTP ${response.status}: expected the chat API validation response`);
+    } catch (error) {
+      lastError = error;
+      if (!retry) break;
+    }
+    const remaining = timeoutMs - (performance.now() - start);
+    if (remaining <= 0) break;
+    await sleep(Math.min(pollIntervalMs, remaining));
+  } while (performance.now() - start < timeoutMs);
+
+  const error = new Error(`Chat API is not ready at ${endpoint}: ${evaluationError(lastError).error}`, { cause: lastError });
+  error.preflight = { status: "failed", attempts, durationMs: Math.round(performance.now() - start), ...evaluationError(lastError) };
+  throw error;
 }
 
 export function evaluateOutcome(result, { maxDurationMs = 30000, maxFirstContentMs = 10000 } = {}) {
@@ -30,17 +85,36 @@ export function summarizeEvaluation(results) {
 
 async function main() {
 const { values } = parseArgs({ options: {
-  "base-url": { type: "string", default: "http://127.0.0.1:3000" },
+  "base-url": { type: "string" },
+  "ready-timeout-ms": { type: "string", default: "30000" },
   models: { type: "boolean", default: false },
   only: { type: "string" },
   timeout: { type: "string", default: "330000" },
   "max-duration-ms": { type: "string", default: "30000" },
   "max-first-content-ms": { type: "string", default: "10000" },
 } });
-for (const key of ["timeout", "max-duration-ms", "max-first-content-ms"]) {
+for (const key of ["timeout", "ready-timeout-ms", "max-duration-ms", "max-first-content-ms"]) {
   if (!Number.isFinite(Number(values[key])) || Number(values[key]) <= 0) throw new Error(`--${key} must be a positive number`);
 }
 const thresholds = { maxDurationMs: Number(values["max-duration-ms"]), maxFirstContentMs: Number(values["max-first-content-ms"]) };
+const endpoint = resolveEvaluationEndpoint(values["base-url"]);
+await mkdir("logs", { recursive: true });
+const path = `logs/chat-evaluation-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+console.log(`Chat API: ${endpoint}`);
+console.log(`Waiting up to ${values["ready-timeout-ms"]}ms for the chat route before running questions...`);
+let preflight;
+try {
+  preflight = await waitForChatApi(endpoint, { timeoutMs: Number(values["ready-timeout-ms"]) });
+} catch (error) {
+  await writeFile(path, JSON.stringify({ complete: false, aborted: true, stage: "preflight", at: new Date().toISOString(),
+    endpoint, thresholds, preflight: error.preflight, results: [] }, null, 2));
+  console.error(error.message);
+  console.error("No chatbot questions were run. Check PORT in .env.local, the --base-url override, and pm2 logs rec-expo-chatbot --lines 60 --nostream.");
+  console.log(`Report: ${path}`);
+  process.exitCode = 1;
+  return;
+}
+console.log(`Chat API ready after ${preflight.durationMs}ms (${preflight.attempts} probe(s)).`);
 const snapshot = snapshotToRuntimeData(await readGeneratedRecSnapshot());
 const active = snapshot.conference;
 const sessionOn = (day) => snapshot.sessions.find((s) => s.day === day)?.title?.trim();
@@ -78,7 +152,7 @@ async function ask(question, history, stream) {
   const start = performance.now();
   let requestId = null;
   try {
-  const response = await fetch(new URL("/api/chat", values["base-url"]), {
+  const response = await fetch(endpoint, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question, history, stream }), signal: AbortSignal.timeout(Number(values.timeout)),
   });
@@ -118,8 +192,6 @@ async function ask(question, history, stream) {
 }
 
 const results = [];
-await mkdir("logs", { recursive: true });
-const path = `logs/chat-evaluation-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
 const selected = checks.filter((scenario) => !values.only || scenario.some((check) => check.question.toLowerCase().includes(values.only.toLowerCase())));
 if (!selected.length) throw new Error("No evaluation scenarios match --only");
 for (const scenario of selected) {
@@ -155,11 +227,11 @@ for (const scenario of selected) {
       results.push({ ...result, ...evaluateOutcome(result, thresholds) });
       console.log(`FAIL ${check.question}: ${error.message}`);
     }
-    await writeFile(path, JSON.stringify({ complete: false, results }, null, 2));
+    await writeFile(path, JSON.stringify({ complete: false, endpoint, preflight, thresholds, results }, null, 2));
   }
 }
 const summary = { ...summarizeEvaluation(results), modelsIncluded: values.models };
-await writeFile(path, JSON.stringify({ complete: true, at: new Date().toISOString(), thresholds, summary, results }, null, 2));
+await writeFile(path, JSON.stringify({ complete: true, at: new Date().toISOString(), endpoint, preflight, thresholds, summary, results }, null, 2));
 console.log(JSON.stringify(summary));
 console.log(`Report: ${path}`);
 if (summary.accepted !== summary.total) process.exitCode = 1;
