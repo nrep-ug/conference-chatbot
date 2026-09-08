@@ -21,8 +21,7 @@ The chat route streams responses to the browser, answers exact public conference
 Install the expected Ollama models:
 
 ```bash
-ollama pull gemma2:2b
-ollama pull command-r
+ollama pull qwen2.5:7b
 ollama pull nomic-embed-text
 ```
 
@@ -38,7 +37,7 @@ Key variables:
 
 ```bash
 OLLAMA_URL=http://localhost:11434
-OLLAMA_TIMEOUT_MS=300000
+OLLAMA_TIMEOUT_MS=120000
 
 APPWRITE_ENDPOINT=https://appwrite.nrep.ug/v1
 APPWRITE_PROJECT_ID=66bcc8450005201fa1af
@@ -73,8 +72,8 @@ SMTP_USER=
 SMTP_PASSWORD=
 SMTP_FROM=
 
-CHAT_MODEL=command-r
-PLANNER_MODEL=command-r
+CHAT_MODEL=qwen2.5:7b
+PLANNER_MODEL=qwen2.5:7b
 EMBED_MODEL=nomic-embed-text
 
 QDRANT_URL=http://localhost:6333
@@ -307,6 +306,7 @@ The app writes one-line JSON diagnostic events to stdout, which PM2 captures. Us
 - `request_coverage` (per-part intent, edition, days, direct/synthesis status and candidate record count)
 - `request_complement_unavailable` (optional enrichment failed or timed out)
 - `ollama_request_start`, `ollama_request_done`, `ollama_request_error` (model name, input size, context/output limits, loading, prompt evaluation and generation timings)
+- `ollama_first_content` (generation has started, including for buffered/validated answers)
 - `answer_direct_appwrite`
 - `planner_executed`
 - `planner_invalid_or_empty`
@@ -328,9 +328,14 @@ can be matched to PM2 events. Model timings use milliseconds: `loadMs` measures
 loading, `promptEvalMs` measures prompt processing, and `generationMs` measures
 output generation. `promptEvalCount`, `evalCount` and `generatedPerSecond` help
 compare models and context sizes. `firstContentMs` measures the first streamed
-content from Ollama, not the first byte sent to the browser. Validated answers
-are buffered before delivery; non-streamed calls have no first-content measurement.
-Timeouts retain elapsed/first-content timing, but missing final metrics remain null.
+content from Ollama, not the first byte sent to the browser. All chat/planner calls
+consume Ollama's stream internally; `delivery: buffered` still withholds content
+until completion and validation. `receivedChars` and `lastContentMs` show progress
+on failed calls, without logging the generated text. `errorCode` distinguishes a
+model deadline (`TimeoutError`), a cancelled request (`AbortError`), and transport
+errors. Missing final load/prompt/generation metrics remain null on timeouts.
+Public SSE responses send comments immediately and every 15 seconds during work;
+comments are not answer tokens. Disconnecting the client cancels upstream work.
 These counters come from the [Ollama chat API](https://docs.ollama.com/api/chat).
 
 For slow VPS model requests, collect these while a request is running:
@@ -383,17 +388,21 @@ The PM2 config:
 - runs two clustered Next.js instances
 - writes logs to `logs/pm2-out.log` and `logs/pm2-error.log`
 
-For `command-r:latest`, use at least 24 GB RAM and preferably 32 GB RAM. In local
-testing, the current Ollama `command-r` Q4 model used about 20.5 GB of resident
-memory with an 8,192-token context before accounting for Next.js, Qdrant, the OS,
-or concurrent requests. A 20 GB server can therefore swap heavily or run out of
-memory with this configuration.
+RAM capacity and inference speed are different constraints. The September 2026
+VPS sample showed `command-r` using about 20 GB on CPU, 36 GiB system RAM with
+15 GiB available, and no swap activity during the sample, yet synthesis requests
+still exceeded five minutes. More RAM alone is not an evidence-based fix for that
+run. The [Command R model](https://ollama.com/library/command-r) has 35B parameters.
 
-On a server with enough memory for `command-r`, use:
+For a CPU-only benchmark, start with [Qwen2.5 7B](https://ollama.com/library/qwen2.5:7b)
+(a 4.7 GB model download, not its total runtime allocation). This is a candidate
+to evaluate, not a promise of latency or accuracy. Keep the embedding model unchanged
+so Qdrant does not need re-ingestion. Update the following keys in the VPS `.env.local`:
 
 ```bash
-CHAT_MODEL=command-r
-PLANNER_MODEL=command-r
+CHAT_MODEL=qwen2.5:7b
+PLANNER_MODEL=qwen2.5:7b
+OLLAMA_TIMEOUT_MS=120000
 CHAT_NUM_CTX=8192
 CHAT_NUM_PREDICT=360
 CHAT_NUM_THREAD=12
@@ -411,9 +420,22 @@ QDRANT_FULL_CONTEXT_MODE=broad
 QDRANT_FULL_CONTEXT_MAX_CHARS=12000
 ```
 
-For the current 14-core, 20 GB VPS, use a model that leaves memory for the OS,
-Next.js and Qdrant, or increase server memory before using `command-r`. Check
-actual runtime allocation with `ollama ps`; model file size alone is insufficient.
+Pull the candidate, rebuild after code changes, and reload the ecosystem file so
+PM2 reads `.env.local` again. During a maintenance window, stop the old model
+before benchmarking to avoid interference from previously timed-out work:
+
+```bash
+ollama pull qwen2.5:7b
+pm2 stop rec-expo-chatbot
+ollama stop command-r
+npm run build
+pm2 startOrReload pm2/ecosystem.config.js --update-env
+npm run eval:chat -- --models
+```
+
+Check actual runtime allocation with `ollama ps`; model file size alone is insufficient.
+Capture `nproc`, `lscpu` and `vmstat 1 10` while testing. Do not assume more threads
+or more PM2 workers make model inference faster; measure on the actual VPS.
 Request-scoped snapshot evidence avoids unnecessary planner calls and limits the
 input size for unusual phrasing. Keep `CHAT_NUM_CTX` large enough for history,
 evidence, instructions and the reserved output budget.
@@ -498,7 +520,8 @@ location /api/chat {
 
 If answers are slow:
 
-- confirm `CHAT_MODEL=command-r`
+- confirm the configured model and its CPU/GPU placement with `ollama ps`
+- use a measured smaller-model baseline on CPU; do not raise timeouts to hide slow inference
 - confirm `PLANNER_MODEL` is pulled if it differs from `CHAT_MODEL`
 - confirm the model is already pulled with `ollama list`
 - keep `CHAT_KEEP_ALIVE=30m` or higher

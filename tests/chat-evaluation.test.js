@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateOutcome, summarizeEvaluation } from "../scripts/evaluate-chat.js";
+import { evaluateOutcome, summarizeEvaluation, evaluationError } from "../scripts/evaluate-chat.js";
 
 test("validation fallback is degraded even if keyword assertions pass", () => {
   const result = evaluateOutcome({ errors: [], validationFallback: true, durationMs: 185932, firstTokenMs: 185931 });
@@ -31,4 +31,10 @@ test("reports separate failures, degradation, latency and checks passed", () => 
   assert.equal(summary.slow, 2);
   assert.equal(summary.requiresHumanReview, 1);
   assert.equal(summary.p95Ms, 300000);
+});
+
+test("transport failures preserve the underlying code", () => {
+  const result = evaluationError(new TypeError("fetch failed", { cause: Object.assign(new Error("Headers timeout"), { code: "UND_ERR_HEADERS_TIMEOUT" }) }));
+  assert.equal(result.errorCode, "UND_ERR_HEADERS_TIMEOUT");
+  assert.match(result.error, /fetch failed.*UND_ERR_HEADERS_TIMEOUT/);
 });

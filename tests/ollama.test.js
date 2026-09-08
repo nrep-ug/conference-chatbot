@@ -17,6 +17,7 @@ test("planner requests JSON format without the previous investment example bias"
   t.mock.method(globalThis, "fetch", async (_url, request) => {
     const body = JSON.parse(request.body);
     assert.equal(body.format, "json");
+    assert.equal(body.stream, true);
     assert.doesNotMatch(body.messages.at(-1).content, /\["investment"\]/);
     return Response.json({ done: true, message: { content: '{"lookup":false}' } });
   });
@@ -67,7 +68,9 @@ test("reports model stage timings and counts without prompt or answer contents",
   assert.equal(metrics.generationMs, 2000);
   assert.equal(metrics.generatedPerSecond, 10);
   assert.equal(metrics.promptEvalCount, 500);
-  assert.equal(metrics.firstContentMs, null);
+  assert.ok(Number.isFinite(metrics.firstContentMs));
+  assert.equal(metrics.delivery, "buffered");
+  assert.equal(metrics.receivedChars, "Published sponsors".length);
   assert.doesNotMatch(JSON.stringify(metrics), /Who are|Published sponsors/);
 });
 
@@ -84,4 +87,53 @@ test("stream failure retains first-content timing without inventing missing fina
 test("diagnostic callback failure does not fail an otherwise complete answer", async (t) => {
   t.mock.method(globalThis, "fetch", async () => Response.json({ done: true, message: { content: "Complete" } }));
   assert.equal(await askMistral({ ...input, onMetrics: () => { throw new Error("observer error"); } }), "Complete");
+});
+
+test("buffered answers collect the stream but never emit unvalidated content", async (t) => {
+  mockStream(t, '{"message":{"content":"Part one "}}\n{"message":{"content":"and two"},"done":true}\n');
+  let emitted = false, metrics;
+  const answer = await askMistral({ ...input, onToken: () => { emitted = true; }, onMetrics: (value) => { metrics = value; } });
+  assert.equal(answer, "Part one and two");
+  assert.equal(emitted, false);
+  assert.equal(metrics.delivery, "buffered");
+  assert.equal(metrics.receivedChars, answer.length);
+});
+
+test("buffered failure records generation progress without accepting a partial answer", async (t) => {
+  mockStream(t, '{"message":{"content":"Partial unpublished response"}}\n');
+  let metrics;
+  await assert.rejects(askMistral({ ...input, onMetrics: (value) => { metrics = value; } }), /before completion/);
+  assert.equal(metrics.success, false);
+  assert.equal(metrics.receivedChars, 28);
+  assert.ok(Number.isFinite(metrics.firstContentMs));
+  assert.ok(Number.isFinite(metrics.lastContentMs));
+  assert.equal(metrics.evalCount, null);
+});
+
+test("model timeout has a distinct reason and cancels the pending request", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(globalThis, "fetch", (_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  }));
+  let metrics;
+  const result = askMistral({ ...input, onMetrics: (value) => { metrics = value; } });
+  const check = assert.rejects(result, { name: "TimeoutError" });
+  t.mock.timers.tick(Number.parseInt(process.env.OLLAMA_TIMEOUT_MS, 10) || 120000);
+  await check;
+  assert.equal(metrics.errorCode, "TimeoutError");
+  assert.equal(metrics.receivedChars, 0);
+  assert.equal(metrics.firstContentMs, null);
+});
+
+test("client cancellation preserves its reason rather than appearing as a model deadline", async (t) => {
+  const abort = new AbortController();
+  t.mock.method(globalThis, "fetch", (_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  }));
+  let metrics;
+  const result = askMistral({ ...input, signal: abort.signal, onMetrics: (value) => { metrics = value; } });
+  const check = assert.rejects(result, { name: "AbortError" });
+  abort.abort();
+  await check;
+  assert.equal(metrics.errorCode, "AbortError");
 });

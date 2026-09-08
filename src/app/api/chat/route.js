@@ -10,6 +10,7 @@ import {
   validateChatQuestion,
 } from "@/lib/chat-conversation";
 import { logChatEvent } from "@/lib/chat-diagnostics";
+import { createSseResponse } from "@/lib/chat-stream";
 import { getEmbedding, askMistral, streamMistral, getAnswerContextBudget } from "@/lib/ollama";
 import { qdrant, QDRANT_COLLECTION } from "@/lib/qdrant";
 import {
@@ -907,13 +908,12 @@ function getClientErrorMessage(error) {
   return "The chatbot failed to process the question.";
 }
 
-function streamAnswer(question, history, signal, requestId) {
+function streamAnswer(question, history, parentSignal, requestId) {
   const encoder = new TextEncoder();
   let retrievalQuestion = buildHistoryAwareQuery(question, history);
 
-  return new Response(
-    new ReadableStream({
-      async start(controller) {
+  return createSseResponse(
+      async (controller, signal) => {
         const startedAt = Date.now();
 
         try {
@@ -1192,8 +1192,8 @@ function streamAnswer(question, history, signal, requestId) {
           controller.close();
         }
       },
-    }),
     {
+      signal: parentSignal,
       headers: {
         "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",

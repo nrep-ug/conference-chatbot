@@ -102,12 +102,12 @@ async function throwOllamaError(response, label, model) {
 
 function createRequestSignal(parentSignal) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
-  const abort = () => controller.abort();
+  const timeout = setTimeout(() => controller.abort(new DOMException("Ollama request timed out", "TimeoutError")), OLLAMA_TIMEOUT_MS);
+  const abort = () => controller.abort(parentSignal.reason);
 
   if (parentSignal) {
     if (parentSignal.aborted) {
-      controller.abort();
+      abort();
     } else {
       parentSignal.addEventListener("abort", abort, {
         once: true,
@@ -124,21 +124,29 @@ function createRequestSignal(parentSignal) {
   };
 }
 
-function createModelTrace({ model, role, stream, messages, options, requestId, onMetrics }) {
+function createModelTrace({ model, role, stream, delivery, messages, options, requestId, onMetrics }) {
   const startedAt = performance.now();
-  let firstContentMs = null, packet = {}, success = false;
-  const metadata = { requestId, model, role, stream, contextSize: options.num_ctx, outputLimit: options.num_predict,
+  let firstContentMs = null, packet = {}, success = false, receivedChars = 0, lastContentMs = null, errorCode = null;
+  const metadata = { requestId, model, role, stream, delivery, contextSize: options.num_ctx, outputLimit: options.num_predict,
     inputChars: messages.reduce((sum, message) => sum + message.content.length, 0) };
   logChatEvent("ollama_request_start", metadata);
   return {
-    content() { firstContentMs ??= Math.round(performance.now() - startedAt); },
+    content(content) {
+      receivedChars += content.length;
+      lastContentMs = Math.round(performance.now() - startedAt);
+      if (firstContentMs === null) {
+        firstContentMs = lastContentMs;
+        logChatEvent("ollama_first_content", { ...metadata, firstContentMs });
+      }
+    },
+    failed(error) { errorCode = error.cause?.code || (typeof error.code === "string" ? error.code : error.name); },
     response(data) { packet = data; },
     complete() { success = true; },
     finish() {
       // Ollama durations are nanoseconds. Missing final metrics stay null on timeouts.
       const number = (key) => Number.isFinite(packet[key]) && packet[key] >= 0 ? packet[key] : null;
       const ms = (key) => number(key) === null ? null : Math.round(number(key) / 1e6);
-      const metrics = { ...metadata, success, durationMs: Math.round(performance.now() - startedAt), firstContentMs,
+      const metrics = { ...metadata, success, durationMs: Math.round(performance.now() - startedAt), firstContentMs, lastContentMs, receivedChars, errorCode,
         loadMs: ms("load_duration"), promptEvalMs: ms("prompt_eval_duration"), generationMs: ms("eval_duration"),
         totalModelMs: ms("total_duration"), promptEvalCount: number("prompt_eval_count"), evalCount: number("eval_count"),
         generatedPerSecond: number("eval_duration") > 0 && number("eval_count") !== null
@@ -268,78 +276,14 @@ export async function getEmbedding(text, { signal } = {}) {
 }
 
 export async function askPlanner({ question, schema, history, signal, requestId, onMetrics }) {
-  const requestSignal = createRequestSignal(signal);
-  const options = buildPlannerOptions();
-  const messages = buildPlannerMessages({ question, schema, history });
-  const trace = createModelTrace({ model: PLANNER_MODEL, role: "planner", stream: false, messages, options, requestId, onMetrics });
-
-  try {
-    const response = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      signal: requestSignal.signal,
-      body: JSON.stringify({
-        model: PLANNER_MODEL,
-        format: "json",
-        stream: false,
-        keep_alive: PLANNER_KEEP_ALIVE,
-        options,
-        messages,
-      }),
-    });
-
-    if (!response.ok) {
-      await throwOllamaError(response, "Planner", PLANNER_MODEL);
-    }
-
-    const data = await response.json();
-    trace.response(data);
-    const answer = completedAnswer(data, data.message?.content, "PLANNER_NUM_PREDICT");
-    trace.complete();
-    return answer;
-  } finally {
-    requestSignal.cleanup();
-    trace.finish();
-  }
+  return requestModelChat({ model: PLANNER_MODEL, role: "planner", format: "json", keepAlive: PLANNER_KEEP_ALIVE,
+    options: buildPlannerOptions(), messages: buildPlannerMessages({ question, schema, history }),
+    outputSetting: "PLANNER_NUM_PREDICT", signal, requestId, onMetrics });
 }
 
 export async function askMistral({ question, context, history, signal, requestId, onMetrics }) {
-  const requestSignal = createRequestSignal(signal);
-  const options = buildChatOptions(context);
-  const messages = buildAnswerMessages({ question, context, history });
-  const trace = createModelTrace({ model: CHAT_MODEL, role: "answer", stream: false, messages, options, requestId, onMetrics });
-
-  try {
-    const response = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      signal: requestSignal.signal,
-      body: JSON.stringify({
-        model: CHAT_MODEL,
-        stream: false,
-        keep_alive: CHAT_KEEP_ALIVE,
-        options,
-        messages,
-      }),
-    });
-
-    if (!response.ok) {
-      await throwOllamaError(response, "Chat", CHAT_MODEL);
-    }
-
-    const data = await response.json();
-    trace.response(data);
-    const answer = completedAnswer(data, data.message?.content);
-    trace.complete();
-    return answer;
-  } finally {
-    requestSignal.cleanup();
-    trace.finish();
-  }
+  // Buffer streamed model content until the caller validates it. Nothing is emitted to the user here.
+  return streamMistral({ question, context, history, signal, requestId, onMetrics });
 }
 
 export async function streamMistral({
@@ -351,13 +295,17 @@ export async function streamMistral({
   requestId,
   onMetrics,
 }) {
+  return requestModelChat({ model: CHAT_MODEL, role: "answer", keepAlive: CHAT_KEEP_ALIVE,
+    options: buildChatOptions(context), messages: buildAnswerMessages({ question, context, history }),
+    signal, onToken, requestId, onMetrics });
+}
+
+async function requestModelChat({ model, role, keepAlive, format, options, messages, outputSetting = "CHAT_NUM_PREDICT", signal, onToken, requestId, onMetrics }) {
   const requestSignal = createRequestSignal(signal);
-  const options = buildChatOptions(context);
-  const messages = buildAnswerMessages({ question, context, history });
-  const trace = createModelTrace({ model: CHAT_MODEL, role: "answer", stream: true, messages, options, requestId, onMetrics });
+  const trace = createModelTrace({ model, role, stream: true, delivery: onToken ? "incremental" : "buffered", messages, options, requestId, onMetrics });
   const finishAnswer = (data, content) => {
     trace.response(data);
-    const answer = completedAnswer(data, content);
+    const answer = completedAnswer(data, content, outputSetting);
     trace.complete();
     return answer;
   };
@@ -370,16 +318,17 @@ export async function streamMistral({
       },
       signal: requestSignal.signal,
       body: JSON.stringify({
-        model: CHAT_MODEL,
+        model,
+        ...(format ? { format } : {}),
         stream: true,
-        keep_alive: CHAT_KEEP_ALIVE,
+        keep_alive: keepAlive,
         options,
         messages,
       }),
     });
 
     if (!response.ok) {
-      await throwOllamaError(response, "Chat", CHAT_MODEL);
+      await throwOllamaError(response, role === "planner" ? "Planner" : "Chat", model);
     }
 
     if (!response.body) {
@@ -408,7 +357,7 @@ export async function streamMistral({
         const token = data.message?.content || "";
 
         if (token) {
-          trace.content();
+          trace.content(token);
           answer += token;
           onToken?.(token);
         }
@@ -424,7 +373,7 @@ export async function streamMistral({
       if (data.error) throw new Error(`Chat stream failed: ${data.error}`);
       const token = data.message?.content || "";
       if (token) {
-        trace.content();
+        trace.content(token);
         answer += token;
         onToken?.(token);
       }
@@ -435,6 +384,9 @@ export async function streamMistral({
       await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
+  } catch (error) {
+    trace.failed(error);
+    throw error;
   } finally {
     requestSignal.cleanup();
     trace.finish();

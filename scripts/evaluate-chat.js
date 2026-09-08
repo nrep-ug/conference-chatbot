@@ -3,6 +3,11 @@ import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { readGeneratedRecSnapshot, snapshotToRuntimeData } from "../src/lib/rec-snapshot.js";
 
+export function evaluationError(error) {
+  const errorCode = error.cause?.code || (typeof error.code === "string" ? error.code : error.name) || "Error";
+  return { error: `${error.message} (${errorCode})`, errorCode };
+}
+
 export function evaluateOutcome(result, { maxDurationMs = 30000, maxFirstContentMs = 10000 } = {}) {
   const latencyErrors = [];
   if (result.durationMs > maxDurationMs) latencyErrors.push(`Total latency exceeds ${maxDurationMs}ms`);
@@ -102,13 +107,13 @@ async function ask(question, history, stream) {
   if (!done) throw new Error("SSE ended without a done event");
   return { answer, sources, requestId, validationFallback, cached, durationMs: Math.round(performance.now() - start), firstTokenMs };
   } catch (error) {
-    return { answer, sources: [], error: error.message, requestId, durationMs: Math.round(performance.now() - start), firstTokenMs };
+    return { answer, sources: [], ...evaluationError(error), requestId, durationMs: Math.round(performance.now() - start), firstTokenMs };
   } finally {
     await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
   } catch (error) {
-    return { answer: "", sources: [], error: error.message, requestId, durationMs: Math.round(performance.now() - start), firstTokenMs: null };
+    return { answer: "", sources: [], ...evaluationError(error), requestId, durationMs: Math.round(performance.now() - start), firstTokenMs: null };
   }
 }
 
@@ -124,6 +129,7 @@ for (const scenario of selected) {
     try {
       const result = await ask(check.question, history, stream);
       const errors = result.error ? [result.error] : [];
+      if (!result.error) {
       for (const text of check.contains || []) if (text && !result.answer.toLowerCase().includes(text.toLowerCase())) errors.push(`Missing: ${text}`);
       for (const text of check.excludes || []) if (text && result.answer.toLowerCase().includes(text.toLowerCase())) errors.push(`Unexpected: ${text}`);
       if (check.minSessionTitles) {
@@ -139,6 +145,7 @@ for (const scenario of selected) {
       }
       if (check.sources !== undefined && result.sources.length !== check.sources) errors.push("Unexpected sources");
       if (!result.answer.trim()) errors.push("Empty answer");
+      }
       const outcome = evaluateOutcome({ ...result, errors }, thresholds);
       results.push({ question: check.question, stream, ...result, errors, ...outcome, requiresHumanReview: check.modelReview || false });
       if (!result.error) history.push({ role: "user", content: check.question }, { role: "assistant", content: result.answer });
