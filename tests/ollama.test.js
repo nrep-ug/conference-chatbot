@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { askMistral, askPlanner, streamMistral, getAnswerContextBudget } from "../src/lib/ollama.js";
+import { askMistral, askPlanner, askStructuredComparison, streamMistral, getAnswerContextBudget } from "../src/lib/ollama.js";
 
 const input = { question: "Who are the sponsors?", context: "Published sponsors" };
 function mockStream(t, packets) {
@@ -22,6 +22,22 @@ test("planner requests JSON format without the previous investment example bias"
     return Response.json({ done: true, message: { content: '{"lookup":false}' } });
   });
   assert.equal(await askPlanner({ question: "List sessions", schema: "Public tables" }), '{"lookup":false}');
+});
+
+test("structured comparisons send the native JSON schema and buffer bounded output", async (t) => {
+  const schema = { type: "object", properties: { topic_1: { type: "string", enum: ["s1"] } }, required: ["topic_1"] };
+  t.mock.method(globalThis, "fetch", async (_url, request) => {
+    const body = JSON.parse(request.body);
+    assert.deepEqual(body.format, schema);
+    assert.equal(body.stream, true);
+    assert.equal(body.options.temperature, 0);
+    assert.ok(body.options.num_predict <= 192);
+    assert.ok(body.messages.at(-1).content.includes(JSON.stringify(schema)));
+    return Response.json({ done: true, message: { content: '{"topic_1":"s1"}' } });
+  });
+  let metrics;
+  assert.equal(await askStructuredComparison({ context: "Candidate records", schema, onMetrics: (value) => { metrics = value; } }), '{"topic_1":"s1"}');
+  assert.equal(metrics.delivery, "buffered");
 });
 
 test("stream decoder preserves UTF-8 and handles a final packet without a newline", async (t) => {

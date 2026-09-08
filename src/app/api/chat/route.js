@@ -11,7 +11,7 @@ import {
 } from "@/lib/chat-conversation";
 import { logChatEvent } from "@/lib/chat-diagnostics";
 import { createSseResponse } from "@/lib/chat-stream";
-import { getEmbedding, askMistral, streamMistral, getAnswerContextBudget } from "@/lib/ollama";
+import { getEmbedding, askMistral, askStructuredComparison, streamMistral, getAnswerContextBudget } from "@/lib/ollama";
 import { qdrant, QDRANT_COLLECTION } from "@/lib/qdrant";
 import {
   getRecPublicSnapshot,
@@ -19,7 +19,7 @@ import {
 import { retrievePlannedRecContext } from "@/lib/rec-planner";
 import { getPlannerSchemaMarkdown } from "@/lib/rec-schema";
 import { getSnapshotPaths, renderRecSnapshotMarkdown } from "@/lib/rec-snapshot";
-import { prepareRecRequest, verifyRecSynthesis } from "@/lib/rec-request";
+import { prepareRecRequest, verifyRecSynthesis, renderStructuredComparison } from "@/lib/rec-request";
 
 export const runtime = "nodejs";
 
@@ -656,8 +656,9 @@ async function prepareAnswerRequest(question, history, signal, requestId) {
       tasks: prepared.coverage,
       direct: Boolean(prepared.direct),
       contextChars: prepared.context?.length || 0,
+      responseMode: prepared.structuredComparison ? "structured_comparison" : "standard",
     });
-    if (!prepared.direct && QDRANT_COMPLEMENT_ENABLED && contextBudget - prepared.context.length > 750) {
+    if (!prepared.direct && !prepared.structuredComparison && QDRANT_COMPLEMENT_ENABLED && contextBudget - prepared.context.length > 750) {
       try {
         const complementSignal = AbortSignal.any([signal, AbortSignal.timeout(readInteger("QDRANT_COMPLEMENT_TIMEOUT_MS", 3000))].filter(Boolean));
         const extra = await retrieveContext(prepared.resolvedQuestion, complementSignal, {
@@ -681,6 +682,16 @@ async function prepareAnswerRequest(question, history, signal, requestId) {
     logChatEvent("request_coverage_unavailable", { requestId, error: error.message });
     return null;
   }
+}
+
+async function synthesizeRecAnswer(prepared, { question, history, signal, requestId }) {
+  if (prepared.structuredComparison) {
+    const raw = await askStructuredComparison({ ...prepared.structuredComparison, history, signal, requestId });
+    return renderStructuredComparison(raw, prepared);
+  }
+  const answer = await askMistral({ question, context: prepared.context, history, signal, requestId });
+  const verification = verifyRecSynthesis(answer, prepared);
+  return { verification, payload: verification.valid ? { answer, sources: prepared.sources } : prepared.fallback };
 }
 
 async function answerQuestion(question, history, signal, requestId) {
@@ -752,21 +763,10 @@ async function answerQuestion(question, history, signal, requestId) {
 
   if (fullRecContext.confident) {
     const answerStartedAt = Date.now();
-    const answer = await askMistral({
-      requestId,
-      question,
-      context: fullRecContext.context,
-      history,
-      signal,
-    });
-    const payload = {
-      answer,
-      sources: fullRecContext.sources,
-    };
-    const verification = verifyRecSynthesis(answer, fullRecContext);
+    const { payload, verification } = await synthesizeRecAnswer(fullRecContext, { question, history, signal, requestId });
     if (!verification.valid) {
       logChatEvent("answer_validation_fallback", { requestId, reason: verification.reason });
-      return fullRecContext.fallback;
+      return payload;
     }
 
     setCachedAnswer(question, payload, history);
@@ -1011,9 +1011,7 @@ function streamAnswer(question, history, parentSignal, requestId) {
           if (fullRecContext.confident) {
             if (fullRecContext.validation) {
               // Validate selection and decision advice before exposing generated claims.
-              const answer = await askMistral({ question, context: fullRecContext.context, history, signal, requestId });
-              const verification = verifyRecSynthesis(answer, fullRecContext);
-              const payload = verification.valid ? { answer, sources: fullRecContext.sources } : fullRecContext.fallback;
+              const { payload, verification } = await synthesizeRecAnswer(fullRecContext, { question, history, signal, requestId });
               if (verification.valid) setCachedAnswer(question, payload, history);
               writeEvent(controller, encoder, "sources", payload.sources);
               writeEvent(controller, encoder, "token", payload.answer);

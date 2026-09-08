@@ -444,6 +444,82 @@ function buildSynthesisFallback(results, snapshot) {
   return { answer: answers.join("\n\n"), sources: uniqueSources(sources), validationFallback: true };
 }
 
+function buildStructuredComparison(results, packed, snapshot) {
+  const pending = results.filter((result) => !result.answer);
+  if (pending.length !== 1 || pending[0].task.kind !== "sessions" || !isRepresentativeTask(pending[0].task)) return null;
+  const result = pending[0];
+  const documents = result.documents.filter((doc) => doc.fields && doc.payload.sourceType === "session" &&
+    packed.sources.some((source) => source.sourceType === "session" && source.rowId === doc.payload.rowId));
+  const topics = [...new Set(documents.flatMap((doc) => doc.comparisonTopics || []))];
+  if (topics.length !== 2) return null;
+  const sessions = [snapshot, ...(snapshot.pastConferences || [])].flatMap((bundle) => bundle.sessions || []);
+  const records = groupedEvidence(documents).filter((group) => group.details && group.comparisonTopics.length).map((group, index) => ({ ...group, id: `s${index + 1}`,
+    slots: group.sources.map((source) => sessions.find((session) => session.$id === source.rowId)).filter(Boolean),
+  }));
+  const groups = topics.map((topic, index) => {
+    let candidates = records.filter((record) => record.comparisonTopics.includes(topic));
+    const explicit = candidates.filter((record) => record.comparisonBasis.includes(`${topic}: published session fields`));
+    if (explicit.length) candidates = explicit;
+    const described = candidates.filter((record) => record.details.preamble?.trim());
+    if (described.length) candidates = described;
+    return { key: `topic_${index + 1}`, topic, ids: candidates.map((record) => record.id) };
+  });
+  if (groups.some((group) => !group.ids.length)) return null;
+  const schema = { type: "object", additionalProperties: false,
+    properties: Object.fromEntries([
+      ...groups.map((group) => [group.key, { type: "string", enum: group.ids }]),
+      ["tradeOff", { type: "string", minLength: 20, maxLength: 320 }],
+    ]), required: [...groups.map((group) => group.key), "tradeOff"] };
+  const input = {
+    request: result.task.question, scope: { years: result.task.years, days: result.task.days, hall: result.task.hall, interests: result.task.interests },
+    topics: groups,
+    records: records.filter((record) => groups.some((group) => group.ids.includes(record.id))).map((record) => ({ id: record.id, title: record.details.title, theme: record.details.theme,
+      descriptionExcerpt: descriptionExcerpt(record.details.preamble || "", result.task.question, 240),
+      relevanceBasis: [...new Set(record.comparisonBasis)],
+    })),
+  };
+  // Timing/speaker comparisons need the full row context; this contract only compares subject focus.
+  const scopeText = norm(result.task.question).replace(/\bwithout inventing speakers\b/g, "").replace(/\bfirst[ -]time\b/g, "");
+  if (/\b(times?|timing|overlap|clash|duration|speakers?|presenters?|before|after|morning|afternoon|evening|halls?|venues?)\b/.test(scopeText)) return null;
+  const context = JSON.stringify(input);
+  if (context.length + JSON.stringify(schema).length > packed.context.length) return null;
+  return { schema, context, groups, records,
+    parts: results.map((part) => part === result ? { comparison: true } : { answer: part.answer }),
+  };
+}
+
+export function renderStructuredComparison(raw, prepared) {
+  const contract = prepared.structuredComparison;
+  const invalid = (reason) => ({ verification: { valid: false, reason }, payload: prepared.fallback });
+  let data;
+  try { data = JSON.parse(raw); } catch { return invalid("invalid_comparison_json"); }
+  if (!contract || !data || Array.isArray(data) || typeof data !== "object" ||
+      Object.keys(data).length !== contract.schema.required.length ||
+      contract.schema.required.some((key) => !Object.hasOwn(data, key))) return invalid("invalid_comparison_shape");
+  if (typeof data.tradeOff !== "string" || data.tradeOff.trim().length < 20 || data.tradeOff.length > 320 ||
+      /[\r\n<>]|https?:\/\//i.test(data.tradeOff) || !/\b(attend\w*|sessions?|learn\w*|understand\w*)\b/i.test(data.tradeOff)) return invalid("invalid_comparison_tradeoff");
+  const chosen = [];
+  for (const group of contract.groups) {
+    if (!group.ids.includes(data[group.key])) return invalid("invalid_comparison_selection");
+    chosen.push({ group, record: contract.records.find((record) => record.id === data[group.key]) });
+  }
+  if (new Set(chosen.map(({ record }) => canonicalTitle(record.details.title))).size !== chosen.length) return invalid("duplicate_comparison_selection");
+  const lines = chosen.map(({ group, record }) => {
+    const slots = record.occurrences.map((slot) => `Day ${slot.day}, ${slot.startTime}-${slot.endTime}, ${slot.hall || "hall not listed"}`).join("; ");
+    const basis = record.comparisonBasis.some((text) => text.startsWith(`${group.topic}: daily theme`))
+      ? "Relevance is inferred from its daily theme, not confirmed session depth." : "Relevance is based on its published session fields.";
+    return `**${group.topic}: ${record.details.title}**\n${slots} (Kampala time).${record.details.theme ? ` Published theme: ${record.details.theme}.` : ""}\n${basis}`;
+  });
+  const overlap = chosen[0].record.slots.some((a) => chosen[1].record.slots.some((b) => new Date(a.startTime) < new Date(b.toTime) && new Date(b.startTime) < new Date(a.toTime)));
+  const comparison = `${lines.join("\n\n")}\n\n**Trade-off advice:** ${data.tradeOff.trim()}${overlap ? "\n\nSome selected occurrences overlap in time; you cannot attend both in full." : ""}\n\nThese are selected examples, not a complete ranking. A title or daily theme alone does not confirm technical depth or format.`;
+  const sources = uniqueSources([...chosen.flatMap(({ record }) => record.sources), ...contract.parts.flatMap((part) => part.answer?.sources || [])]);
+  const answer = contract.parts.map((part) => part.comparison ? comparison : part.answer.answer).join("\n\n");
+  const verification = verifyRecSynthesis(answer, { ...prepared, validation: { ...prepared.validation,
+    sessionEvidence: chosen.flatMap(({ record }) => record.sources).map((source) => ({ title: source.source, text: source.text || "" })),
+  } });
+  return { verification, payload: verification.valid ? { answer, sources } : prepared.fallback };
+}
+
 export async function prepareRecRequest(question, { history = [], signal, snapshot: supplied, maxContextChars = 18000 } = {}) {
   const snapshot = supplied ? snapshotToRuntimeData(supplied) : await getRecPublicSnapshot({ signal });
   const request = resolveRecRequest(question, history, snapshot);
@@ -516,6 +592,7 @@ export async function prepareRecRequest(question, { history = [], signal, snapsh
     minTitles: Math.min(titles.length, request.tasks.some((t) => /\b(compare|comparison|versus)\b/i.test(t.question)) ? 2 : 1),
   } : null;
   return { ...request, direct, coverage, validation, fallback: validation ? buildSynthesisFallback(results, snapshot) : null,
+    structuredComparison: requiresSelection ? buildStructuredComparison(results, packed, snapshot) : null,
     indexedExclusions: uniqueSources(results.flatMap((r) => r.documents.map((d) => d.payload))).map((s) => `${s.sourceType}:${s.rowId || s.source}`),
     ...packed };
 }

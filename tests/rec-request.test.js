@@ -1,12 +1,109 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { prepareRecRequest, resolveRecRequest, verifyRecSynthesis } from "../src/lib/rec-request.js";
+import { prepareRecRequest, resolveRecRequest, verifyRecSynthesis, renderStructuredComparison } from "../src/lib/rec-request.js";
 import { snapshotToRuntimeData } from "../src/lib/rec-snapshot.js";
 import { buildConversationCacheKey } from "../src/lib/chat-conversation.js";
 import { createSnapshot } from "./fixtures/rec-snapshot.js";
 
 const historyOf = (...questions) => questions.map((content) => ({ role: "user", content }));
 const run = (question, history = [], options = {}) => prepareRecRequest(question, { snapshot: createSnapshot(), history, ...options });
+const comparisonReply = (prepared) => ({
+  ...Object.fromEntries(prepared.structuredComparison.groups.map((group) => [group.key, group.ids[0]])),
+  tradeOff: "Attend a technology session to learn about its subject, while investment discussions may fit a funding goal; depth is not confirmed.",
+});
+
+test("structured comparisons render official identities and occurrence data from server records", async () => {
+  const prepared = await run("Compare the technology and investment sessions for a first-time visitor. Explain the trade-offs, without inventing speakers.");
+  assert.ok(prepared.structuredComparison);
+  const result = renderStructuredComparison(JSON.stringify(comparisonReply(prepared)), prepared);
+  assert.equal(result.verification.valid, true);
+  assert.match(result.payload.answer, /Clean Cooking Technology Forum/);
+  assert.match(result.payload.answer, /Renewable Energy Investment Forum/);
+  assert.match(result.payload.answer, /8:30 am-3:30 pm/);
+  assert.match(result.payload.answer, /overlap in time/);
+  assert.match(result.payload.answer, /Trade-off advice/);
+  assert.doesNotMatch(result.payload.answer, /topic_1|"s1"/);
+  assert.equal(result.payload.sources.length, 2);
+});
+
+test("structured selections cannot omit topics, forge IDs, swap topic IDs or add fields", async () => {
+  const prepared = await run("Compare technology and investment sessions");
+  const good = comparisonReply(prepared);
+  for (const invalid of [
+    "Not JSON", "null", "[]", JSON.stringify({ topic_1: good.topic_1, tradeOff: good.tradeOff }),
+    JSON.stringify({ ...good, topic_1: "draft-session" }),
+    JSON.stringify({ ...good, topic_1: good.topic_2 }),
+    JSON.stringify({ ...good, fabricatedSpeaker: "Fake Person" }),
+    JSON.stringify({ ...good, tradeOff: "Short" }),
+    JSON.stringify({ ...good, tradeOff: "Invest in technology for immediate tangible results and long-term strategic gains." }),
+    JSON.stringify({ ...good, tradeOff: "x".repeat(321) }),
+  ]) {
+    const result = renderStructuredComparison(invalid, prepared);
+    assert.equal(result.verification.valid, false, invalid);
+    assert.equal(result.payload.validationFallback, true);
+    assert.doesNotMatch(result.payload.answer, /Fake Person|draft-session/);
+  }
+});
+
+test("structured advice is still checked for unsupported session format claims", async () => {
+  const prepared = await run("Compare technology and investment sessions");
+  const reply = { ...comparisonReply(prepared), tradeOff: "Attend Clean Cooking Technology Forum for a deep dive into technical training." };
+  assert.equal(renderStructuredComparison(JSON.stringify(reply), prepared).verification.reason, "unverified_session_detail");
+});
+
+test("structured comparison candidates respect the requested day", async () => {
+  const prepared = await run("Compare technology and investment sessions on Day 2");
+  assert.ok(prepared.structuredComparison);
+  for (const record of prepared.structuredComparison.records) {
+    assert.ok(record.slots.length);
+    assert.ok(record.slots.every((slot) => slot.day === 2));
+  }
+  const result = renderStructuredComparison(JSON.stringify(comparisonReply(prepared)), prepared);
+  assert.equal(result.verification.valid, true);
+  assert.doesNotMatch(result.payload.answer, /Financing Universal Energy Access|Day 1/);
+});
+
+test("structured comparisons prefer described explicit candidates over theme-only matches", async () => {
+  const snapshot = createSnapshot();
+  snapshot.sessions.find((session) => session.$id === "investment-day-2").preamble = "";
+  const prepared = await run("Compare technology and investment sessions", [], { snapshot });
+  const contract = prepared.structuredComparison;
+  const investment = contract.groups.find((group) => group.topic === "investment");
+  assert.ok(investment.ids.length);
+  for (const id of investment.ids) {
+    const record = contract.records.find((candidate) => candidate.id === id);
+    assert.ok(record.details.preamble);
+    assert.ok(record.comparisonBasis.includes("investment: published session fields"));
+    assert.ok(record.sources.every((source) => source.rowId === "finance-day-1"));
+  }
+  const input = JSON.parse(contract.context);
+  assert.ok(input.records.every((record) => contract.groups.some((group) => group.ids.includes(record.id))));
+});
+
+test("a session eligible for both topics cannot be compared with itself", async () => {
+  const prepared = await run("Compare technology and investment sessions");
+  const reply = comparisonReply(prepared);
+  prepared.structuredComparison.groups[1].ids.push(reply.topic_1);
+  reply.topic_2 = reply.topic_1;
+  assert.equal(renderStructuredComparison(JSON.stringify(reply), prepared).verification.reason, "duplicate_comparison_selection");
+});
+
+test("compound direct parts retain their order and sources around a structured comparison", async () => {
+  const prepared = await run("Who are the sponsors? Compare technology and investment sessions? And what is the date of day 2?");
+  assert.ok(prepared.structuredComparison);
+  const result = renderStructuredComparison(JSON.stringify(comparisonReply(prepared)), prepared);
+  assert.equal(result.verification.valid, true);
+  assert.ok(result.payload.answer.indexOf("GIZ Uganda") < result.payload.answer.indexOf("Trade-off advice"));
+  assert.ok(result.payload.answer.indexOf("2026-10-20") > result.payload.answer.indexOf("Trade-off advice"));
+  assert.ok(result.payload.sources.some((source) => source.sourceType === "sponsor"));
+});
+
+test("detailed, timing and unsupported-edition comparisons keep the full-context path", async () => {
+  for (const question of ["Compare all technology and investment sessions", "Compare technology and investment sessions in depth", "Compare technology and investment sessions by their times", "Compare technology and investment sessions at REC24"]) {
+    const prepared = await run(question);
+    assert.equal(prepared.structuredComparison, null, question);
+  }
+});
 
 const cases = [
   ["When will the conference take place?", /19 October 2026/, /will take place at/],

@@ -276,7 +276,7 @@ Both JSON and streaming requests use the same request preparation in `src/lib/re
 2. Resolve each request using bounded user history. Preserve the selected edition, programme topic, days, named sessions and relevant interests; explicit changes override earlier selections. Assistant messages are not authoritative facts.
 3. Answer supported lookups directly from the public snapshot. Return a direct compound answer only when every parsed part has an answer. Unrecognized constraints and synthesis questions go to the model instead of being silently discarded. Session listings and day schedules are not silently cut to a handful of rows.
 4. For synthesis, reserve evidence separately for every request and keep editions isolated. Rank public session descriptions and other relevant records within `REC_REQUEST_CONTEXT_MAX_CHARS` (default 9000), bounded by `REC_FULL_CONTEXT_MAX_CHARS` and an estimated model context budget. Label omitted evidence as partial; only included records contribute sources. Token estimates are conservative, not an exact model tokenizer.
-5. When enabled, Qdrant adds supporting evidence to unresolved requests within the remaining budget. `QDRANT_COMPLEMENT_TIMEOUT_MS` (default 3000) bounds this optional enrichment. Complete structured answers do not receive an unrelated raw-context appendix or another model pass.
+5. When enabled, Qdrant adds supporting evidence to unresolved requests within the remaining budget. `QDRANT_COMPLEMENT_TIMEOUT_MS` (default 3000) bounds this optional enrichment. Complete structured answers do not receive an unrelated raw-context appendix or another model pass. Bounded structured comparisons use their snapshot candidate allowlist without Qdrant enrichment; broader synthesis still uses the configured complement.
 6. If request preparation is unavailable, retain the existing full-snapshot, full-Qdrant, validated planner, and semantic-search fallback paths. The `REC_FULL_CONTEXT_ENABLED`/`MODE` and `QDRANT_FULL_CONTEXT_ENABLED`/`MODE` switches control these fallback paths, not normal request-scoped retrieval. `QDRANT_COMPLEMENT_MODE` applies only to legacy direct-answer enrichment.
 
 The planner requests JSON and rejects unknown tables and invented text filters. It joins session lookups to daily themes and reports both matched and included row counts; partial or empty operations are not treated as complete retrievals.
@@ -289,6 +289,23 @@ the expected published session titles. A rejected selection returns clearly
 labelled public record examples instead, preserves other question parts, logs
 `answer_validation_fallback`, and is not cached. This is a targeted safeguard,
 not a general factual-verification engine; model answers still require evaluation.
+
+Concise two-topic session comparisons use [Ollama structured outputs](https://docs.ollama.com/capabilities/structured-outputs):
+the answer model returns one allowed session ID per topic and a short trade-off,
+not free-form session names or timetable facts. The server validates the complete
+JSON response and renders exact titles, occurrence times, halls, source references
+and overlap warnings from the selected records. Already-answered compound parts
+(such as sponsors or a day date) are preserved in their original order without
+being regenerated. Invalid IDs, wrong-topic choices, omitted fields and rejected
+advice remain marked, uncached fallbacks; the title checks are not relaxed.
+
+This path uses `CHAT_MODEL`, not another planner round trip, with a maximum of
+192 generated tokens. It applies when there is one unresolved, concise two-topic
+comparison. Detailed/exhaustive requests, timing/speaker comparisons and other
+unresolved question types retain full-context synthesis. Diagnostics identify the
+path as `responseMode: "structured_comparison"` in `request_coverage`; use the
+Ollama event's `inputChars` for the actual model input size. JSON structure improves
+identity reliability but does not prove that free-text advice is correct or fast.
 
 The machine-readable schema allowlist lives in `src/lib/rec-schema.js`. Update both that file and `docs/conference-schema.md` when the public REC table structure changes.
 
