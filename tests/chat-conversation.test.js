@@ -68,11 +68,11 @@ test("sanitizes and bounds client-provided conversation history", () => {
 test("handles acknowledgement-only follow-ups without invoking a model", () => {
   assert.equal(
     getConversationalReply("ohh.. that is nice", greetingHistory),
-    "Glad that was helpful. What would you like to explore next about REC26 & EXPO?"
+    "Glad that was helpful. What would you like to explore next?"
   );
   assert.equal(
     getConversationalReply("thank you", greetingHistory),
-    "You're welcome. What else would you like to know about REC26 & EXPO?"
+    "You're welcome!"
   );
   assert.equal(
     getConversationalReply("that is a nice venue", greetingHistory),
@@ -83,6 +83,70 @@ test("handles acknowledgement-only follow-ups without invoking a model", () => {
     null
   );
   assert.equal(getConversationalReply("ohh.. that is nice", []), null);
+});
+
+const photoHistory = [
+  { role: "user", content: "Show me the official photos from REC24" },
+  {
+    role: "assistant",
+    content: "REC24 & EXPO Album (image_album). Open album. Sample images: Image 1.",
+  },
+];
+
+test("recognizes combined courtesy phrases after historical conference answers", () => {
+  for (const question of [
+    "ohh... thank you",
+    "Ohhh... THANK YOU!!!",
+    "ah, thanks",
+    "okay, thanks",
+    "oh, okay, thank you",
+    "great, thank you so much",
+    "thanks a lot",
+    "many thanks",
+    "thank you very much",
+    "much appreciated",
+    "I really appreciate it",
+    "okay, got it. Thanks!",
+    "that's helpful, thank you",
+    "that\u2019s nice, thanks",
+    "nice and helpful, thanks",
+    "thank you for the photos",
+    "thanks for your help",
+    "ohh\u2026 thank you \u{1f64f}",
+  ]) {
+    assert.equal(getConversationalReply(question, photoHistory), "You're welcome!", question);
+    assert.equal(getConversationalReply(question, []), "You're welcome!", question);
+  }
+
+  for (const question of ["ohh, okay", "ah, got it", "okay, understood"]) {
+    assert.equal(
+      getConversationalReply(question, photoHistory),
+      "Understood. What would you like to explore next?",
+      question
+    );
+  }
+});
+
+test("does not consume questions, corrections, or negative feedback after thanks", () => {
+  for (const question of [
+    "thanks, where is lunch?",
+    "ohh... thank you, can you show REC25 photos too?",
+    "okay, thanks, what happens on Day 2?",
+    "thanks and who are the sponsors?",
+    "that's nice, tell me more",
+    "thank you for the photos, where was REC24 held?",
+    "thanks, but the link doesn't work",
+    "thank you but that is not what I asked",
+    "no thanks",
+    "not helpful",
+    "thank you for nothing",
+    "great speakers, who are they?",
+    "thanks \u4f1a\u8bae\u5728\u54ea\u91cc", // Preserve the question in Chinese.
+    "thanks and",
+    "hello there",
+  ]) {
+    assert.equal(getConversationalReply(question, photoHistory), null, question);
+  }
 });
 
 test("adds recent context only to genuinely referential retrieval queries", () => {

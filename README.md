@@ -271,16 +271,25 @@ Set `"rebuildQdrant":true` only when you also want the API call to rebuild the v
 
 Authenticated admins can also refresh the same data from `/admin` without using the token endpoint.
 
-The chat route uses this order:
+Both JSON and streaming requests use the same request preparation in `src/lib/rec-request.js`:
 
-1. Scope guard for greetings and off-topic questions.
-2. Direct snapshot answers for deterministic facts such as venue, dates, registration status, contact details, capacity, fees, website, sponsors, published visitor guidance, historical editions, media, reports, and common programme questions.
-3. Optional Qdrant complement for broad direct answers such as detailed overviews, session summaries, learning questions, technology-area questions, and preparation questions. Appwrite still provides the authoritative answer; Qdrant only adds indexed supporting context. Set `QDRANT_COMPLEMENT_ENABLED=true` to enable it. The default `QDRANT_COMPLEMENT_MODE=append` avoids a second chat-model call; use `model` only if you want the model to rewrite the direct answer with Qdrant context.
-4. Full public snapshot context for unresolved conference questions. `REC_FULL_CONTEXT_ENABLED=true` gives the answer model the public active and historical data plus the conference schema when the deterministic resolver does not know the requested answer shape. Historical bundles are moved ahead of active data when the question names their year or REC edition. `REC_FULL_CONTEXT_MODE=fallback` applies this only after direct answers miss; `broad` restricts it to broad synthesis questions.
-5. Optional full Qdrant context for broad/advisory questions. Set `QDRANT_FULL_CONTEXT_ENABLED=true` to give the answer model indexed public REC data when the question needs synthesis rather than a single row lookup. `QDRANT_FULL_CONTEXT_MODE=broad` limits this to broad questions; `always` sends full context for every model-backed question.
-6. Planner lookup for richer cross-table questions. The human-readable schema lives in `docs/conference-schema.md`; the runtime planner receives a compact schema prompt from `src/lib/rec-schema.js`, returns a strict JSON plan, and `src/lib/rec-planner.js` validates requested tables, fields, filters, sorting, limits, and conference-year scope before retrieving public REC data.
-7. Qdrant semantic search as a fallback.
-8. Official facts in model-backed answers must come from retrieved context. For preparation, planning, logistics, and recommendations, the model may add practical advice when it is clearly grounded in the context and not presented as an official conference fact.
+1. Acknowledge courtesy-only messages without a database or model call; apply the conference scope guard to other messages.
+2. Resolve each request using bounded user history. Preserve the selected edition, programme topic, days, named sessions and relevant interests; explicit changes override earlier selections. Assistant messages are not authoritative facts.
+3. Answer supported lookups directly from the public snapshot. Return a direct compound answer only when every parsed part has an answer. Unrecognized constraints and synthesis questions go to the model instead of being silently discarded. Session listings and day schedules are not silently cut to a handful of rows.
+4. For synthesis, reserve evidence separately for every request and keep editions isolated. Rank public session descriptions and other relevant records within `REC_REQUEST_CONTEXT_MAX_CHARS` (default 9000), bounded by `REC_FULL_CONTEXT_MAX_CHARS` and an estimated model context budget. Label omitted evidence as partial; only included records contribute sources. Token estimates are conservative, not an exact model tokenizer.
+5. When enabled, Qdrant adds supporting evidence to unresolved requests within the remaining budget. `QDRANT_COMPLEMENT_TIMEOUT_MS` (default 3000) bounds this optional enrichment. Complete structured answers do not receive an unrelated raw-context appendix or another model pass.
+6. If request preparation is unavailable, retain the existing full-snapshot, full-Qdrant, validated planner, and semantic-search fallback paths. The `REC_FULL_CONTEXT_ENABLED`/`MODE` and `QDRANT_FULL_CONTEXT_ENABLED`/`MODE` switches control these fallback paths, not normal request-scoped retrieval. `QDRANT_COMPLEMENT_MODE` applies only to legacy direct-answer enrichment.
+
+The planner requests JSON and rejects unknown tables and invented text filters. It joins session lookups to daily themes and reports both matched and included row counts; partial or empty operations are not treated as complete retrievals.
+
+Official facts must come from the supplied evidence. Advice must be identified as advice. Finance recommendations cite terms present in published fields and flag overlapping sessions. `CHAT_NUM_PREDICT` is the base output budget; compound and comparative answers can expand up to `CHAT_MAX_NUM_PREDICT` (default 1024). Empty, interrupted, and token-limited model responses produce an explicit error and are never cached as finished answers. A changed snapshot file invalidates answer-cache keys.
+
+Model-backed session selections are buffered until session-identity checks pass.
+The checks reject daily themes presented as session names and answers missing
+the expected published session titles. A rejected selection returns clearly
+labelled public record examples instead, preserves other question parts, logs
+`answer_validation_fallback`, and is not cached. This is a targeted safeguard,
+not a general factual-verification engine; model answers still require evaluation.
 
 The machine-readable schema allowlist lives in `src/lib/rec-schema.js`. Update both that file and `docs/conference-schema.md` when the public REC table structure changes.
 
@@ -295,6 +304,8 @@ CHAT_DIAGNOSTIC_LOGS=true
 The app writes one-line JSON diagnostic events to stdout, which PM2 captures. Useful events include:
 
 - `request_start`
+- `request_coverage` (per-part intent, edition, days, direct/synthesis status and candidate record count)
+- `request_complement_unavailable` (optional enrichment failed or timed out)
 - `answer_direct_appwrite`
 - `planner_executed`
 - `planner_invalid_or_empty`
@@ -319,6 +330,8 @@ npm run build    # Build the production app
 npm run start    # Start the production app after building
 npm run lint     # Run ESLint
 npm test         # Run deterministic chatbot tests and ESLint
+npm run eval:chat # Test the running HTTP API, including conversational follow-ups
+npm run eval:chat -- --models # Also run slower model-backed synthesis checks
 npm run export:rec # Export active and historical public REC data
 npm run ingest   # Rebuild the Qdrant vector collection
 npm run refresh:rec # Export public REC data, then rebuild Qdrant
@@ -374,13 +387,35 @@ QDRANT_FULL_CONTEXT_MODE=broad
 QDRANT_FULL_CONTEXT_MAX_CHARS=12000
 ```
 
-For the current 14-core, 20 GB VPS, use `qwen2.5:3b` or another smaller model for
-both `CHAT_MODEL` and `PLANNER_MODEL`, or increase the server memory before using
-`command-r`. With `command-r`, keep broad Qdrant complement in `append` mode unless
-you intentionally want a second model pass with `QDRANT_COMPLEMENT_MODE=model`.
-Full REC snapshot context is the preferred fallback for unusual phrasing because
-it uses the generated Appwrite source data directly; keep `CHAT_NUM_CTX` high
-enough for the selected model.
+For the current 14-core, 20 GB VPS, use a model that leaves memory for the OS,
+Next.js and Qdrant, or increase server memory before using `command-r`. Check
+actual runtime allocation with `ollama ps`; model file size alone is insufficient.
+Request-scoped snapshot evidence avoids unnecessary planner calls and limits the
+input size for unusual phrasing. Keep `CHAT_NUM_CTX` large enough for history,
+evidence, instructions and the reserved output budget.
+
+## Repeatable Evaluation
+
+Run `npm test` before deployment. The suite covers scope inheritance, compound
+coverage, unpublished data, recommendations, planner validation, Unicode cache
+keys, and simulated interrupted/token-limited model responses without Ollama.
+
+Start the application, then run `npm run eval:chat`. It checks both JSON and SSE
+responses against the local public snapshot. To target a different deployment:
+
+```bash
+npm run eval:chat -- --base-url https://your-chatbot.example.org --models
+npm run eval:chat -- --models --only Compare
+```
+
+The snapshot used by the evaluator must match that deployment. Results are saved incrementally
+under `logs/chat-evaluation-*.json`, including answers, source references, first
+token timings (streaming only), total latency, partial failed responses and failed assertions. Model cases
+are marked for human review: keyword assertions do not prove factual accuracy or
+recommendation quality. Review unsupported claims, omitted question parts and
+schedule conflicts before considering a model/configuration validated. Reports
+contain public test prompts and responses; keep them private if you add real user
+conversations. No data re-ingestion is required for routing-only code changes.
 
 ## Reverse Proxy Notes
 

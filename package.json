@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "test": "node --test && npm run lint",
+    "eval:chat": "node --env-file=.env.local scripts/evaluate-chat.js",
     "lint": "eslint",
     "export:rec": "node --env-file=.env.local scripts/export-rec-snapshot.js",
     "ingest": "node --env-file=.env.local scripts/ingest.js",

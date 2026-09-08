@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 
 import {
   buildConversationCacheKey,
@@ -9,15 +10,15 @@ import {
   validateChatQuestion,
 } from "@/lib/chat-conversation";
 import { logChatEvent } from "@/lib/chat-diagnostics";
-import { getEmbedding, askMistral, streamMistral } from "@/lib/ollama";
+import { getEmbedding, askMistral, streamMistral, getAnswerContextBudget } from "@/lib/ollama";
 import { qdrant, QDRANT_COLLECTION } from "@/lib/qdrant";
 import {
-  getDirectRecAnswer,
   getRecPublicSnapshot,
 } from "@/lib/rec-data";
 import { retrievePlannedRecContext } from "@/lib/rec-planner";
 import { getPlannerSchemaMarkdown } from "@/lib/rec-schema";
-import { renderRecSnapshotMarkdown } from "@/lib/rec-snapshot";
+import { getSnapshotPaths, renderRecSnapshotMarkdown } from "@/lib/rec-snapshot";
+import { prepareRecRequest, verifyRecSynthesis } from "@/lib/rec-request";
 
 export const runtime = "nodejs";
 
@@ -135,12 +136,18 @@ function getConversationAnswer(question, history) {
 }
 
 function getAnswerCacheKey(question, history) {
+  let revision = "live";
+  try {
+    const stat = statSync(getSnapshotPaths().json);
+    revision = `${stat.mtimeMs}:${stat.size}`;
+  } catch { /* A live Appwrite deployment may not have an exported snapshot. */ }
   return createHash("sha256")
+    .update(revision)
     .update(buildConversationCacheKey(question, history))
     .digest("base64url");
 }
 
-function getAssistantScopeAnswer(question) {
+function getAssistantScopeAnswer(question, history = []) {
   const normalized = normalizeQuestion(question);
   const hasConferenceTerms = CONFERENCE_TERMS.test(normalized);
 
@@ -166,7 +173,7 @@ function getAssistantScopeAnswer(question) {
     };
   }
 
-  if (!hasConferenceTerms && GENERAL_KNOWLEDGE_START.test(normalized)) {
+  if (!hasConferenceTerms && GENERAL_KNOWLEDGE_START.test(normalized) && !isHistoryDependentFollowUp(question, history)) {
     return {
       answer: OUT_OF_SCOPE_ANSWER,
       sources: [],
@@ -205,6 +212,7 @@ function getCachedAnswer(question, history = []) {
 }
 
 function setCachedAnswer(question, payload, history = []) {
+  if (payload.validationFallback) return;
   if (ANSWER_CACHE_TTL_MS <= 0 || ANSWER_CACHE_MAX <= 0) return;
 
   const key = getAnswerCacheKey(question, history);
@@ -630,10 +638,48 @@ async function complementDirectAnswer(
   }
 }
 
+async function prepareAnswerRequest(question, history, signal, requestId) {
+  const startedAt = Date.now();
+  try {
+    const contextBudget = Math.min(readInteger("REC_REQUEST_CONTEXT_MAX_CHARS", 9000), REC_FULL_CONTEXT_MAX_CHARS, getAnswerContextBudget(question, history));
+    const prepared = await prepareRecRequest(question, { history, signal, maxContextChars: contextBudget });
+    if (!prepared.direct && contextBudget < 1500) {
+      throw new Error("CHAT_NUM_CTX is too small for the conversation and answer budgets.");
+    }
+    logChatEvent("request_coverage", {
+      requestId,
+      durationMs: Date.now() - startedAt,
+      tasks: prepared.coverage,
+      direct: Boolean(prepared.direct),
+      contextChars: prepared.context?.length || 0,
+    });
+    if (!prepared.direct && QDRANT_COMPLEMENT_ENABLED && contextBudget - prepared.context.length > 750) {
+      try {
+        const complementSignal = AbortSignal.any([signal, AbortSignal.timeout(readInteger("QDRANT_COMPLEMENT_TIMEOUT_MS", 3000))].filter(Boolean));
+        const extra = await retrieveContext(prepared.resolvedQuestion, complementSignal, {
+          limit: QDRANT_COMPLEMENT_SEARCH_LIMIT,
+          maxContextChars: Math.min(QDRANT_COMPLEMENT_MAX_CONTEXT_CHARS, Math.max(0, contextBudget - prepared.context.length - 150)),
+          minScore: QDRANT_COMPLEMENT_MIN_SCORE,
+        });
+        if (extra.confident && prepared.context.length + extra.context.length + 150 <= contextBudget) {
+          prepared.context += `\n\nSupplementary indexed evidence (the structured facts above take precedence):\n${extra.context}`;
+          prepared.sources = mergeSources(prepared.sources, extra.sources);
+        }
+      } catch (error) {
+        logChatEvent("request_complement_unavailable", { requestId, error: error.message });
+      }
+    }
+    return prepared;
+  } catch (error) {
+    if (signal?.aborted || /CHAT_NUM_CTX/.test(error.message)) throw error;
+    logChatEvent("request_coverage_unavailable", { requestId, error: error.message });
+    return null;
+  }
+}
+
 async function answerQuestion(question, history, signal, requestId) {
   const startedAt = Date.now();
-  const historyDependent = isHistoryDependentFollowUp(question, history);
-  const retrievalQuestion = buildHistoryAwareQuery(question, history);
+  let retrievalQuestion = buildHistoryAwareQuery(question, history);
   const cached = getCachedAnswer(question, history);
   if (cached) {
     logChatEvent("answer_cache_hit", {
@@ -656,7 +702,7 @@ async function answerQuestion(question, history, signal, requestId) {
     return conversationAnswer;
   }
 
-  const scopeAnswer = getAssistantScopeAnswer(question);
+  const scopeAnswer = getAssistantScopeAnswer(question, history);
 
   if (scopeAnswer) {
     setCachedAnswer(question, scopeAnswer, history);
@@ -667,9 +713,9 @@ async function answerQuestion(question, history, signal, requestId) {
     return scopeAnswer;
   }
 
-  const directAnswer = historyDependent
-    ? null
-    : await getDirectRecAnswer(question, { signal });
+  const prepared = await prepareAnswerRequest(question, history, signal, requestId);
+  retrievalQuestion = prepared?.resolvedQuestion || retrievalQuestion;
+  const directAnswer = prepared?.direct;
 
   if (directAnswer) {
     const complementedAnswer = await complementDirectAnswer(
@@ -692,7 +738,7 @@ async function answerQuestion(question, history, signal, requestId) {
     return payload;
   }
 
-  const fullRecContext = await retrieveFullRecContext(
+  const fullRecContext = prepared?.context ? { ...prepared, confident: true } : await retrieveFullRecContext(
     retrievalQuestion,
     signal,
     requestId
@@ -710,6 +756,11 @@ async function answerQuestion(question, history, signal, requestId) {
       answer,
       sources: fullRecContext.sources,
     };
+    const verification = verifyRecSynthesis(answer, fullRecContext);
+    if (!verification.valid) {
+      logChatEvent("answer_validation_fallback", { requestId, reason: verification.reason });
+      return fullRecContext.fallback;
+    }
 
     setCachedAnswer(question, payload, history);
     logChatEvent("answer_full_rec_context", {
@@ -832,6 +883,10 @@ function isRequestTimeout(error) {
 function getClientErrorMessage(error) {
   const message = error?.message || "";
 
+  if (/output limit|before completion|complete answer/i.test(message)) {
+    return "The response could not be completed. Please retry or ask for fewer details; no incomplete answer has been cached.";
+  }
+
   if (isRequestTimeout(error)) {
     return "The answer model took too long to respond. Please try the question again or ask for a narrower part of the conference programme.";
   }
@@ -845,8 +900,7 @@ function getClientErrorMessage(error) {
 
 function streamAnswer(question, history, signal, requestId) {
   const encoder = new TextEncoder();
-  const historyDependent = isHistoryDependentFollowUp(question, history);
-  const retrievalQuestion = buildHistoryAwareQuery(question, history);
+  let retrievalQuestion = buildHistoryAwareQuery(question, history);
 
   return new Response(
     new ReadableStream({
@@ -895,7 +949,7 @@ function streamAnswer(question, history, signal, requestId) {
             return;
           }
 
-          const scopeAnswer = getAssistantScopeAnswer(question);
+          const scopeAnswer = getAssistantScopeAnswer(question, history);
 
           if (scopeAnswer) {
             setCachedAnswer(question, scopeAnswer, history);
@@ -910,9 +964,9 @@ function streamAnswer(question, history, signal, requestId) {
             return;
           }
 
-          const directAnswer = historyDependent
-            ? null
-            : await getDirectRecAnswer(question, { signal });
+          const prepared = await prepareAnswerRequest(question, history, signal, requestId);
+          retrievalQuestion = prepared?.resolvedQuestion || retrievalQuestion;
+          const directAnswer = prepared?.direct;
 
           if (directAnswer) {
             const complementedAnswer = await complementDirectAnswer(
@@ -939,13 +993,26 @@ function streamAnswer(question, history, signal, requestId) {
             return;
           }
 
-          const fullRecContext = await retrieveFullRecContext(
+          const fullRecContext = prepared?.context ? { ...prepared, confident: true } : await retrieveFullRecContext(
             retrievalQuestion,
             signal,
             requestId
           );
 
           if (fullRecContext.confident) {
+            if (fullRecContext.validation) {
+              // Hold selection claims until their session identity checks pass.
+              const answer = await askMistral({ question, context: fullRecContext.context, history, signal });
+              const verification = verifyRecSynthesis(answer, fullRecContext);
+              const payload = verification.valid ? { answer, sources: fullRecContext.sources } : fullRecContext.fallback;
+              setCachedAnswer(question, payload, history);
+              writeEvent(controller, encoder, "sources", payload.sources);
+              writeEvent(controller, encoder, "token", payload.answer);
+              writeEvent(controller, encoder, "done", { cached: false, validationFallback: Boolean(payload.validationFallback) });
+              logChatEvent(verification.valid ? "stream_verified_synthesis" : "answer_validation_fallback", { requestId, durationMs: Date.now() - startedAt, reason: verification.reason, sourceCount: payload.sources.length });
+              controller.close();
+              return;
+            }
             writeEvent(controller, encoder, "sources", fullRecContext.sources);
 
             const answerStartedAt = Date.now();
@@ -1105,6 +1172,7 @@ function streamAnswer(question, history, signal, requestId) {
             durationMs: Date.now() - startedAt,
             error: error.message,
           });
+          writeEvent(controller, encoder, "sources", []);
           writeEvent(controller, encoder, "error", {
             error: getClientErrorMessage(error),
           });

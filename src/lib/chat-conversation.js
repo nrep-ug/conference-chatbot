@@ -1,5 +1,24 @@
 const ALLOWED_HISTORY_ROLES = new Set(["user", "assistant"]);
 
+const COURTESY_PHRASES = [
+  {
+    kind: "gratitude",
+    pattern:
+      /^(?:(?:many )?thanks(?: a lot| so much| very much)?|thank you(?: very much| so much)?|(?:much|really) appreciated|(?:i )?(?:really )?appreciate (?:it|that))(?: for (?:the |your )?(?:help|answer|information|info|details|photos|pictures|images|album|links?|report|explanation|guidance))?(?=\s|$)/,
+  },
+  {
+    kind: "positive",
+    pattern:
+      /^(?:(?:that|this|it) (?:is|was|sounds|looks) )?(?:(?:very|really|quite|so) )?(?:nice|great|good|helpful|useful|interesting|clear|amazing|perfect|excellent|awesome|cool|wonderful|lovely)(?=\s|$)/,
+  },
+  {
+    kind: "acknowledgement",
+    pattern:
+      /^(?:okay|ok|alright|all right|got it|i see|i understand|understood|makes sense|sounds good|noted)(?=\s|$)/,
+  },
+  { kind: "interjection", pattern: /^(?:oh+|ah+|wow|well|hey|hi|hello)(?=\s|$)/ },
+];
+
 export const DEFAULT_CHAT_HISTORY_LIMITS = Object.freeze({
   maxMessages: 8,
   maxMessageChars: 1200,
@@ -116,36 +135,41 @@ export function sanitizeChatHistory(rawHistory, options = {}) {
 }
 
 export function getConversationalReply(question, history = []) {
+  // Keep all language content so a mixed-language question cannot become just "thanks".
+  let remaining = String(question || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\u2018\u2019`]/g, "'")
+    .replace(/\b(that|this|it)'s\b/g, "$1 is")
+    .replace(/[^\p{L}\p{N}'\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!remaining || remaining.length > 120) return null;
+
+  const kinds = new Set();
+
+  // Every phrase must be a courtesy; any remaining request uses the normal answer flow.
+  while (remaining) {
+    const phrase = COURTESY_PHRASES.find(({ pattern }) => pattern.test(remaining));
+    if (!phrase) return null;
+
+    kinds.add(phrase.kind);
+    remaining = remaining.replace(phrase.pattern, "").trimStart();
+    if (remaining === "and") return null;
+    remaining = remaining.replace(/^and\s+/, "");
+  }
+
+  // Explicit thanks are safe to acknowledge even when the client sends no history.
+  if (kinds.has("gratitude")) return "You're welcome!";
   if (!Array.isArray(history) || history.length === 0) return null;
 
-  const normalized = normalizedConversationText(question);
-  if (!normalized || normalized.length > 120) return null;
-
-  if (
-    /^(?:many )?(?:thanks|thank you|thank you very much|much appreciated)$/.test(
-      normalized
-    )
-  ) {
-    return "You're welcome. What else would you like to know about REC26 & EXPO?";
+  if (kinds.has("positive")) {
+    return "Glad that was helpful. What would you like to explore next?";
   }
 
-  if (
-    /^(?:(?:oh+|ah+|wow|well)\s+)?(?:(?:that|this|it)\s+(?:is|was|sounds|looks)\s+)?(?:(?:very|really|quite)\s+)?(?:nice|great|good|helpful|useful|interesting|clear|amazing|perfect|excellent|awesome|cool|wonderful|lovely)$/.test(
-      normalized
-    )
-  ) {
-    return "Glad that was helpful. What would you like to explore next about REC26 & EXPO?";
-  }
-
-  if (
-    /^(?:ok|okay|alright|all right|got it|i see|understood|makes sense|sounds good|noted)$/.test(
-      normalized
-    )
-  ) {
-    return "Understood. What would you like to explore next about REC26 & EXPO?";
-  }
-
-  return null;
+  return kinds.has("acknowledgement")
+    ? "Understood. What would you like to explore next?"
+    : null;
 }
 
 export function isHistoryDependentFollowUp(question, history = []) {
@@ -201,11 +225,11 @@ export function buildHistoryAwareQuery(question, history = [], options = {}) {
 export function buildConversationCacheKey(question, history = []) {
   const recentHistory = sanitizeChatHistory(history).map((message) => ({
     role: message.role,
-    content: normalizedConversationText(message.content),
+    content: message.content.normalize("NFC"),
   }));
 
   return JSON.stringify({
-    question: normalizedConversationText(question),
+    question: String(question).normalize("NFC").trim(),
     history: recentHistory,
   });
 }

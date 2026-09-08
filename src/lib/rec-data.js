@@ -711,7 +711,7 @@ function addUniqueDay(days, day) {
   days.push(day);
 }
 
-function extractRequestedDays(normalized) {
+export function extractRequestedDays(normalized) {
   const days = [];
   const rangePattern = new RegExp(
     `\\b(?:from\\s+)?days?\\s*(${DAY_TOKEN_PATTERN})\\s*(?:to|through|until|-|–|—)\\s*(?:days?\\s*)?(${DAY_TOKEN_PATTERN})\\b`,
@@ -735,7 +735,7 @@ function extractRequestedDays(normalized) {
 
     const min = Math.min(start, end);
     const max = Math.max(start, end);
-    for (let day = min; day <= max; day += 1) {
+    for (let day = min; day <= Math.min(max, 31); day += 1) {
       addUniqueDay(days, day);
     }
   }
@@ -758,7 +758,7 @@ function extractRequestedDay(normalized) {
   return extractRequestedDays(normalized)[0] || null;
 }
 
-function getRequestedDayPart(normalized) {
+export function getRequestedDayPart(normalized) {
   if (/\blate morning\b/.test(normalized)) {
     return { label: "late morning", startMinutes: 660, endMinutes: 780 };
   }
@@ -795,7 +795,7 @@ function blockOverlapsDayPart(block, dayPart) {
   );
 }
 
-function sessionOverlapsDayPart(session, dayPart) {
+export function sessionOverlapsDayPart(session, dayPart) {
   return overlapsDayPart(
     getKampalaMinutes(session.startTime),
     getKampalaMinutes(session.toTime),
@@ -821,7 +821,6 @@ function answerDaySchedule(day, snapshot, options = {}) {
   }
 
   const sessionSummary = sessions
-    .slice(0, 8)
     .map((session) =>
       compact([
         session.startTime && session.toTime
@@ -832,7 +831,6 @@ function answerDaySchedule(day, snapshot, options = {}) {
       ]).join(" ")
     );
   const blockSummary = timeBlocks
-    .slice(0, dayPart ? 12 : 5)
     .map((block) =>
       compact([
         `${formatTime(block.startTime)}-${formatTime(block.endTime)}`,
@@ -1913,24 +1911,20 @@ function answerFinanceRecommendations(snapshot, options = {}) {
           ]).join(", ")
         )
         .join("; ");
-      const title = normalizeQuestion(group.title || "");
-      let rationale = group.preamble
-        ? "It explicitly covers investors, financiers, capital, partnerships, deal-making, blended finance, guarantees, and de-risking for clean energy investment."
-        : group.theme && !/^tbc$/i.test(group.theme)
-          ? group.theme
-          : "This session is finance-relevant based on its title or listed organizer.";
+      const publishedText = normalizeQuestion([group.title, group.theme, group.preamble].join(" "));
+      const matchedTerms = getFinanceKeywords().filter((term) => publishedText.includes(term));
+      const specificTerms = matchedTerms.filter((term) => !matchedTerms.some((other) => other !== term && other.includes(term))).slice(0, 5);
+      const rationale = specificTerms.length
+        ? `Its published title, theme or description mentions ${specificTerms.join(", ")}.`
+        : "Its listed organizer suggests finance relevance; detailed content is not yet published.";
+      const provisional = /\btbc\b/i.test(publishedText) ? " Some programme details are still marked TBC." : "";
 
-      if (title.includes("africa development bank")) {
-        rationale =
-          "It is listed as an Africa Development Bank session, so it is likely the strongest development-finance-oriented session currently published, although details are still marked TBC.";
-      }
-
-      return `**${group.title}**: ${schedule}. Why: ${rationale}`;
+      return `**${group.title}**: ${schedule}. Why: ${rationale}${provisional}`;
     })
     .filter(Boolean);
 
   return joinMarkdownSections([
-    "For someone in finance, I would prioritize these published REC26 & EXPO sessions:",
+    `For someone in finance, I would prioritize these published ${snapshot.conference.shortName || snapshot.conference.title} sessions:`,
     markdownNumberedList(recommendations),
   ]);
 }

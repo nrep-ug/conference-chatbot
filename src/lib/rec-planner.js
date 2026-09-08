@@ -1,6 +1,6 @@
 import { askPlanner } from "./ollama.js";
 import { logChatEvent } from "./chat-diagnostics.js";
-import { getRecPublicSnapshot } from "./rec-data.js";
+import { extractRequestedDays, getRecPublicSnapshot } from "./rec-data.js";
 import { getPlannerSchemaPrompt, REC_SCHEMA } from "./rec-schema.js";
 
 const PLANNER_ENABLED = process.env.PLANNER_ENABLED !== "false";
@@ -27,7 +27,7 @@ function readInteger(name, fallback) {
 }
 
 function normalize(value) {
-  return String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+  return String(value || "").toLowerCase().replace(/&/g, " and ").replace(/\s+/g, " ").trim();
 }
 
 function stripHtml(value) {
@@ -114,6 +114,7 @@ function cleanStringArray(value, maxItems = 8) {
 }
 
 function sanitizeFilters(filters = {}) {
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) return {};
   const sanitized = {};
 
   if (Number.isFinite(Number(filters.day))) {
@@ -168,6 +169,7 @@ function sanitizeFilters(filters = {}) {
 
 function sanitizeOperation(operation) {
   const table = cleanString(operation?.table);
+  if (!Object.hasOwn(REC_SCHEMA.tables, table)) return null;
   const tableSchema = REC_SCHEMA.tables[table];
 
   if (!tableSchema) return null;
@@ -203,7 +205,7 @@ function sanitizePlan(rawPlan) {
     .filter(Boolean)
     .slice(0, MAX_OPERATIONS);
 
-  if (operations.length === 0) return null;
+  if (operations.length === 0 || operations.length !== rawPlan.operations?.length) return null;
 
   return {
     lookup: true,
@@ -211,6 +213,24 @@ function sanitizePlan(rawPlan) {
     answerStyle: cleanString(rawPlan.answerStyle, 120),
     operations,
   };
+}
+
+export function validateRecPlan(rawPlan, question) {
+  const plan = sanitizePlan(rawPlan);
+  if (!plan) return null;
+  const text = normalize(question);
+  // Refuse invented narrowing instead of treating any nonempty lookup as correct.
+  for (const operation of plan.operations) {
+    for (const [key, value] of Object.entries(operation.filters)) {
+      if (key === "day" && !extractRequestedDays(text).includes(value)) return null;
+      if (["year", "conferenceYear"].includes(key) && !text.includes(String(value)) && !new RegExp(`\\brec\\s*[-']?\\s*${String(value).slice(2)}\\b`).test(text)) return null;
+      if (["keywords", "title", "theme", "venueHall", "categoryName"].includes(key)) {
+        const values = Array.isArray(value) ? value : [value];
+        if (values.some((item) => !text.includes(normalize(item)))) return null;
+      }
+    }
+  }
+  return plan;
 }
 
 function getConferenceBundles(snapshot) {
@@ -274,6 +294,12 @@ function valueToText(value) {
 function rowSearchText(row, table, snapshot) {
   const tableSchema = REC_SCHEMA.tables[table];
   const values = tableSchema.searchableFields.map((field) => valueToText(row[field]));
+
+  if (table === "sessions") {
+    const bundle = getConferenceBundles(snapshot).find((b) => b.conference.$id === row.conferenceId);
+    const day = parseJson(bundle?.conference.days, [])[Number(row.day) - 1];
+    values.push(day?.theme || "");
+  }
 
   if (table === "sponsors") {
     const categories = getSponsorCategoryMap(snapshot);
@@ -345,7 +371,11 @@ function rowMatchesFilters(row, table, filters, snapshot) {
     if (!containsText(row, titleFields, filters.title)) return false;
   }
 
-  if (filters.theme && !containsText(row, ["theme"], filters.theme)) return false;
+  if (filters.theme && !containsText(row, ["theme"], filters.theme)) {
+    const bundle = getConferenceBundles(snapshot).find((b) => b.conference.$id === row.conferenceId);
+    const day = parseJson(bundle?.conference.days, [])[Number(row.day) - 1];
+    if (table !== "sessions" || !normalize(day?.theme).includes(normalize(filters.theme))) return false;
+  }
 
   if (filters.venueHall) {
     const venueText = normalize(`${valueToText(row.venueHall)} ${valueToText(row.venueHalls)}`);
@@ -503,6 +533,7 @@ function executeOperation(operation, snapshot) {
 
   return {
     operation,
+    total: rows.length,
     rows: sortedRows,
     context: sortedRows
       .map((row) =>
@@ -513,29 +544,33 @@ function executeOperation(operation, snapshot) {
   };
 }
 
-function executePlan(plan, snapshot) {
+export function executeRecPlan(plan, snapshot, maxContextChars = MAX_CONTEXT_CHARS) {
   const results = plan.operations.map((operation) =>
     executeOperation(operation, snapshot)
   );
-  const contextSections = results
-    .filter((result) => result.rows.length > 0)
-    .map((result) => {
-      const purpose = result.operation.purpose
-        ? `Purpose: ${result.operation.purpose}\n`
-        : "";
-
-      return `${purpose}${result.context}`;
-    });
+  const contextSections = [];
+  const coverage = [];
   const sources = [];
   const seenSources = new Set();
-
+  const budget = Math.floor(Math.max(0, maxContextChars - 500) / Math.max(1, results.length));
   for (const result of results) {
-    for (const source of result.sources) {
+    let section = `Table: ${result.operation.table}; matching records: ${result.total}.\n`;
+    let included = 0;
+    for (const row of result.rows) {
+      const text = formatRowContext(row, result.operation.table, result.operation.fields, snapshot);
+      if (section.length + text.length + 100 > budget) continue;
+      section += `\n${text}\n`;
+      included += 1;
+      const source = sourceFor(result.operation.table, row);
       const key = `${source.sourceType}:${source.rowId}`;
       if (seenSources.has(key)) continue;
       seenSources.add(key);
       sources.push(source);
     }
+    const complete = included === result.total;
+    coverage.push({ table: result.operation.table, matched: result.total, included, complete });
+    section += `\nCoverage: ${included}/${result.total}. ${complete ? "Complete lookup." : "Partial evidence; do not claim a complete list or infer missing facts."}`;
+    contextSections.push(section);
   }
 
   if (contextSections.length === 0) {
@@ -551,18 +586,14 @@ function executePlan(plan, snapshot) {
       .map((bundle) => bundle.conference?.year)
       .filter(Boolean)
       .join(", ") || "none"}`,
-    `Planner reason: ${plan.reason || "lookup required"}`,
-    plan.answerStyle ? `Requested answer style: ${plan.answerStyle}` : null,
   ]
     .filter(Boolean)
     .join("\n");
 
   return {
-    context: `${header}\n\n${contextSections.join("\n\n---\n\n")}`.slice(
-      0,
-      MAX_CONTEXT_CHARS
-    ),
+    context: `${header}\n\n${contextSections.join("\n\n---\n\n")}`,
     sources,
+    coverage,
   };
 }
 
@@ -594,7 +625,7 @@ export async function retrievePlannedRecContext(
     const schema = getPlannerSchemaPrompt().slice(0, MAX_SCHEMA_CHARS);
     const rawPlanText = await askPlanner({ question, schema, history, signal });
     const rawPlan = extractJsonObject(rawPlanText);
-    const plan = sanitizePlan(rawPlan);
+    const plan = validateRecPlan(rawPlan, question);
 
     if (!plan) {
       logChatEvent("planner_invalid_or_empty", {
@@ -607,18 +638,20 @@ export async function retrievePlannedRecContext(
     }
 
     const snapshot = await getRecPublicSnapshot({ signal });
-    const result = executePlan(plan, snapshot);
+    const result = executeRecPlan(plan, snapshot);
+    const confident = result.sources.length > 0 && result.coverage.every((item) => item.complete && item.matched > 0);
     logChatEvent("planner_executed", {
       requestId,
       durationMs: Date.now() - startedAt,
-      confident: result.context.length > 0,
+      confident,
+      coverage: result.coverage,
       sourceCount: result.sources.length,
       contextChars: result.context.length,
       plan: summarizePlan(plan),
     });
 
     return {
-      confident: result.context.length > 0,
+      confident,
       context: result.context,
       sources: result.sources,
       plan,
