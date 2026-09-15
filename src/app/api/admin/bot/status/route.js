@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises";
 
-import { getAdminAuthState, requireAdmin } from "@/lib/admin-auth";
+import { getAdminAuthState, isOwner, requireAdmin } from "@/lib/admin-auth";
 import { qdrant, QDRANT_COLLECTION } from "@/lib/qdrant";
 import {
   getSnapshotPaths,
@@ -150,7 +150,7 @@ export async function GET(request) {
     auth: {
       configuredUsers: authState.configuredUsers,
       allowedUsers: authState.allowedUsers,
-      users: authState.users,
+      users: isOwner(auth.user) ? authState.users : [],
       hasStableSecret: authState.hasStableSecret,
     },
     snapshot,

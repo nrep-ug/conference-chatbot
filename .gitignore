@@ -50,6 +50,7 @@ data/generated/*
 
 # runtime admin auth store
 data/admin/admin-users.json
+data/admin/*.lock
 data/admin/conference-knowledge.json
 data/admin/*.tmp
 data/admin/*.sqlite*

@@ -1,5 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { logChatEvent } from "@/lib/chat-diagnostics";
-import { requireAdmin } from "@/lib/admin-auth";
+import { isAdministrator, requireAdmin } from "@/lib/admin-auth";
+import { apiErrorResponse, checkAdminOrigin } from "@/lib/chat-api";
+import { ApiError } from "@/lib/api-integrations";
 import { ingestRecSnapshotToQdrant } from "@/lib/rec-qdrant-ingest";
 import { invalidateRecPublicSnapshotCache } from "@/lib/rec-data";
 import { refreshGeneratedRecSnapshot } from "@/lib/rec-snapshot";
@@ -18,6 +21,17 @@ async function readJson(request) {
 export async function POST(request) {
   const auth = await requireAdmin(request);
   if (auth.response) return auth.response;
+  if (!isAdministrator(auth.user))
+    return apiErrorResponse(
+      new ApiError(403, "forbidden", "Administrator access is required."),
+      randomUUID(),
+      false,
+    );
+  try {
+    checkAdminOrigin(request);
+  } catch (error) {
+    return apiErrorResponse(error, randomUUID(), false);
+  }
 
   const startedAt = Date.now();
   const body = await readJson(request);

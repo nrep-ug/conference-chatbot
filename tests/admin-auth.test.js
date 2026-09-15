@@ -69,3 +69,54 @@ test("admin session/status reads neither rewrite the account store nor revive ex
     rmSync(dir, { recursive: true });
   }
 });
+
+test("verification attempts are bounded and an unsent code can be invalidated", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "rec-auth-code-"));
+  const file = path.join(dir, "data", "admin", "admin-users.json");
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({
+    version: 1,
+    users: [{
+      email: "qa@example.invalid",
+      username: "QA",
+      passwordHash: "hash",
+      passwordSalt: "salt",
+      role: "owner",
+    }],
+    loginCodes: [],
+    sessions: [],
+  }));
+  const moduleUrl = new URL("../src/lib/admin-auth.js", import.meta.url).href;
+  const script = `
+    import assert from "node:assert/strict";
+    import { readFileSync } from "node:fs";
+    const auth = await import(${JSON.stringify(moduleUrl)});
+    const email = "qa@example.invalid";
+    const code = await auth.createAdminLoginCode(email);
+    assert.equal(code.mode, "login");
+    for (let attempt = 0; attempt < 5; attempt++)
+      await assert.rejects(auth.loginAdmin({ email, code: "wrong-code", clientPasswordHash: "a".repeat(64) }), /verification code/i);
+    assert.equal(JSON.parse(readFileSync(${JSON.stringify(file)}, "utf8")).loginCodes[0].failedAttempts, 5);
+    await assert.rejects(auth.createAdminLoginCode(email), /too many verification attempts/i);
+    assert.equal(await auth.invalidateAdminLoginCode(email, "wrong-code"), false);
+    assert.equal(await auth.invalidateAdminLoginCode(email, code.code), true);
+    const replacement = await auth.createAdminLoginCode(email);
+    assert.equal(replacement.reused, false);
+    for (let attempt = 0; attempt < 5; attempt++)
+      await assert.rejects(auth.loginAdmin({ email, code: replacement.code, clientPasswordHash: "a".repeat(64) }), /invalid admin credentials/i);
+    assert.equal(JSON.parse(readFileSync(${JSON.stringify(file)}, "utf8")).loginCodes[0].failedAttempts, 5);
+    await assert.rejects(auth.loginAdmin({ email, code: replacement.code, clientPasswordHash: "a".repeat(64) }), /verification code/i);
+    assert.equal(JSON.parse(readFileSync(${JSON.stringify(file)}, "utf8")).sessions.length, 0);
+  `;
+  try {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, ADMIN_AUTH_SECRET: "isolated-code-test-secret", ADMIN_AUTH_FILE: "admin-users.json" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    assert.equal(path.dirname(dir), tmpdir());
+    rmSync(dir, { recursive: true });
+  }
+});

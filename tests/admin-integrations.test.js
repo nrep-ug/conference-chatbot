@@ -12,6 +12,7 @@ test("real admin handlers require session, role, origin and version; keys are on
   mkdirSync(path.dirname(file), { recursive: true });
   const secret = "isolated-admin-test-secret";
   const users = [
+    { email: "owner@example.invalid", username: "Owner", passwordHash: "hash", passwordSalt: "salt", role: "owner" },
     { email: "admin@example.invalid", username: "Admin", passwordHash: "hash", passwordSalt: "salt", role: "admin" },
     { email: "viewer@example.invalid", username: "Viewer", passwordHash: "hash", passwordSalt: "salt", role: "viewer" },
   ];
@@ -28,11 +29,13 @@ test("real admin handlers require session, role, origin and version; keys are on
     'assert.equal((await GET(new Request(url))).status,401);',
     'assert.equal((await POST(req({action:"create",settings:{name:"Test app"}},"viewer"))).status,403);',
     'assert.equal((await POST(req({action:"create",settings:{name:"Test app"}},"admin","http://hostile.invalid"))).status,403);',
-    'const created=await POST(req({action:"create",settings:{name:"Test app"}})); assert.equal(created.status,201);',
+    'assert.equal((await GET(new Request(url,{headers:{cookie:"rec_admin_session=owner"}}))).status,200);',
+    'const created=await POST(req({action:"create",settings:{name:"Test app"}},"owner")); assert.equal(created.status,201);',
     'const data=await created.json(); assert.ok(data.key); const id=data.integration.id;',
     'assert.equal(created.headers.get("cache-control"),"no-store");',
     'const listed=await GET(new Request(url,{headers:{cookie:"rec_admin_session=admin"}}));',
     'const list=await listed.json(); assert.equal(list.integrations.length,1); assert.ok(!JSON.stringify(list).includes(data.key));',
+    'assert.equal((await GET(new Request(url,{headers:{cookie:"rec_admin_session=viewer"}}))).status,200);',
     'assert.equal((await POST(req({action:"update",id,version:1,settings:{enabled:false}}))).status,200);',
     'assert.equal((await POST(req({action:"update",id,version:1,settings:{enabled:true}}))).status,409);',
     'const rotated=await (await POST(req({action:"rotate",id,version:2}))).json(); assert.ok(rotated.key); assert.notEqual(rotated.key,data.key);',

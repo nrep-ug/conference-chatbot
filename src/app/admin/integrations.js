@@ -224,7 +224,7 @@ function SettingsForm({ item, onSave, onClose, busy, error }) {
   );
 }
 
-export default function Integrations({ registry, reload, loading, loadError }) {
+export default function Integrations({ registry, reload, loading, loadError, canManage = true }) {
   const [query, setQuery] = useState(""),
     [filter, setFilter] = useState("all"),
     [page, setPage] = useState(0);
@@ -301,10 +301,12 @@ export default function Integrations({ registry, reload, loading, loadError }) {
           </h2>
           <p>Shared REC knowledge · Server-to-server access</p>
         </div>
-        <button className="admin-button primary" onClick={() => open("create")}>
-          <Plus size={17} />
-          New integration
-        </button>
+        {canManage && (
+          <button className="admin-button primary" onClick={() => open("create")}>
+            <Plus size={17} />
+            New integration
+          </button>
+        )}
       </div>
       {notice && (
         <p className="admin-notice" role="status">
@@ -360,9 +362,7 @@ export default function Integrations({ registry, reload, loading, loadError }) {
               <th>Today / quota</th>
               <th>Limits</th>
               <th>Key expiry</th>
-              <th>
-                <span className="sr-only">Actions</span>
-              </th>
+              {canManage && <th aria-label="Actions" />}
             </tr>
           </thead>
           <tbody>
@@ -405,7 +405,7 @@ export default function Integrations({ registry, reload, loading, loadError }) {
                       timeZone: "UTC",
                     })}
                   </td>
-                  <td>
+                  {canManage && <td>
                     <div className="admin-actions">
                       <button
                         disabled={Boolean(item.revokedAt)}
@@ -435,7 +435,7 @@ export default function Integrations({ registry, reload, loading, loadError }) {
                         <ShieldOff size={16} />
                       </button>
                     </div>
-                  </td>
+                  </td>}
                 </tr>
               ))}
           </tbody>
@@ -451,7 +451,7 @@ export default function Integrations({ registry, reload, loading, loadError }) {
                 ? "No matching integrations"
                 : "No integrations yet"}
           </h3>
-          {!loading && !query && filter === "all" && (
+          {canManage && !loading && !query && filter === "all" && (
             <button className="admin-button" onClick={() => open("create")}>
               <Plus size={16} />
               Register an application

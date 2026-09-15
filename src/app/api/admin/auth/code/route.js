@@ -1,4 +1,4 @@
-import { createAdminLoginCode } from "@/lib/admin-auth";
+import { createAdminLoginCode, invalidateAdminLoginCode } from "@/lib/admin-auth";
 import { sendAdminLoginCode } from "@/lib/smtp-mailer";
 
 export const runtime = "nodejs";
@@ -13,10 +13,13 @@ async function readJson(request) {
 
 export async function POST(request) {
   const body = await readJson(request);
+  let loginCode;
+  let deliveryAttempted = false;
 
   try {
-    const loginCode = await createAdminLoginCode(body.email);
+    loginCode = await createAdminLoginCode(body.email);
     if (!loginCode.reused) {
+      deliveryAttempted = true;
       await sendAdminLoginCode(loginCode);
     }
 
@@ -27,6 +30,18 @@ export async function POST(request) {
       expiresAt: loginCode.expiresAt,
     });
   } catch (error) {
+    if (deliveryAttempted && loginCode?.code) {
+      try {
+        await invalidateAdminLoginCode(loginCode.email, loginCode.code);
+      } catch (cleanupError) {
+        console.error("Failed to invalidate unsent admin code:", cleanupError);
+      }
+    }
+    if (/too many verification attempts/i.test(error.message || ""))
+      return Response.json(
+        { error: error.message },
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
     const isAllowedEmailError = /not allowed/i.test(error.message || "");
 
     if (isAllowedEmailError) {

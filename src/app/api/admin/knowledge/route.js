@@ -10,7 +10,9 @@ import {
   getRecPublicSnapshot,
   invalidateRecPublicSnapshotCache,
 } from "@/lib/rec-data";
-import { requireAdmin } from "@/lib/admin-auth";
+import { isAdministrator, requireAdmin } from "@/lib/admin-auth";
+import { apiErrorResponse, checkAdminOrigin } from "@/lib/chat-api";
+import { ApiError } from "@/lib/api-integrations";
 import { ingestRecSnapshotToQdrant } from "@/lib/rec-qdrant-ingest";
 import { writeGeneratedRecSnapshot } from "@/lib/rec-snapshot";
 
@@ -67,6 +69,17 @@ export async function GET(request) {
 export async function PUT(request) {
   const auth = await requireAdmin(request);
   if (auth.response) return auth.response;
+  if (!isAdministrator(auth.user))
+    return apiErrorResponse(
+      new ApiError(403, "forbidden", "Administrator access is required."),
+      randomUUID(),
+      false,
+    );
+  try {
+    checkAdminOrigin(request);
+  } catch (error) {
+    return apiErrorResponse(error, randomUUID(), false);
+  }
 
   const startedAt = Date.now();
   const body = await readJson(request);
@@ -137,3 +150,4 @@ export async function PUT(request) {
     );
   }
 }
+import { randomUUID } from "node:crypto";

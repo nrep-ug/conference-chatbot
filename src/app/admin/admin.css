@@ -605,6 +605,7 @@
   font-weight: 550;
 }
 .admin-form input:not([type="checkbox"]),
+.admin-form select,
 .admin-form textarea {
   display: block;
   margin-top: 6px;

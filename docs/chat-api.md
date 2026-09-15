@@ -12,7 +12,7 @@ Set request limits and expiry. The default key lifetime is 90 days.
 The secret is returned once. Put it in the **calling backend's** secret manager
 as REC_CHAT_API_KEY, not in this chatbot's public environment variables.
 
-Keys are SHA-256 hashes at rest, with 256 random secret bits. Administrators can
+Keys are SHA-256 hashes at rest, with 256 random secret bits. Owners and administrators can
 disable, edit limits, rotate or permanently revoke an integration. Rotation
 immediately invalidates the previous key and gives the replacement a 90-day
 lifetime. Already-admitted requests may finish after these changes.

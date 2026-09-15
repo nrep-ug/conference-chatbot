@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { requireAdmin } from "../../../../lib/admin-auth.js";
+import { isAdministrator, requireAdmin } from "../../../../lib/admin-auth.js";
 import {
   ApiError,
   getIntegrationStore,
@@ -15,12 +15,6 @@ export const runtime = "nodejs";
 export async function GET(request) {
   const auth = await requireAdmin(request);
   if (auth.response) return auth.response;
-  if (auth.user.role !== "admin")
-    return apiErrorResponse(
-      new ApiError(403, "forbidden", "Administrator access is required."),
-      randomUUID(),
-      false,
-    );
   try {
     return Response.json(getIntegrationStore().list(), {
       headers: { "Cache-Control": "no-store" },
@@ -33,7 +27,7 @@ export async function GET(request) {
 export async function POST(request) {
   const auth = await requireAdmin(request);
   if (auth.response) return auth.response;
-  if (auth.user.role !== "admin")
+  if (!isAdministrator(auth.user))
     return apiErrorResponse(
       new ApiError(403, "forbidden", "Administrator access is required."),
       randomUUID(),

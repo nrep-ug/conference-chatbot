@@ -28,7 +28,7 @@ ollama pull nomic-embed-text
 ## Registered APIs And Administration
 
 The redesigned admin workspace has separate Overview, Visitor knowledge,
-Data & runtime, API integrations, and Admin access views. Existing SMTP sign-in,
+Data & runtime, API integrations, and Team access views. Existing SMTP sign-in,
 knowledge publication, and data refresh remain available.
 
 Register application backends under **API integrations** to issue expiring API
@@ -196,6 +196,7 @@ It provides:
 - active-conference venue and visitor knowledge with draft/published states
 - historical conference, media, and report counts
 - runtime status for models, Qdrant, SMTP, and generated REC data
+- owner-managed approved accounts with role changes and revocation
 
 Runtime account data is stored in `data/admin/admin-users.json`, which is ignored by git. The tracked seed file is `data/admin/admin-users.example.json`.
 
@@ -208,6 +209,19 @@ cp data/admin/admin-users.example.json data/admin/admin-users.json
 ```
 
 Then edit `data/admin/admin-users.json` and replace `admin@example.com` with the allowed admin email address. Keep `username`, `passwordHash`, and other account fields empty. The allowed user will complete setup from `/admin` after receiving an SMTP verification code.
+
+After the first owner signs in, use **Team access** to approve more emails.
+New accounts remain pending until each recipient verifies their own email and
+sets a username and password at `/admin`; no password or verification code is
+created by the owner. Owners and administrators can manage conference knowledge,
+snapshot refreshes, and API integrations. Viewers can inspect status and
+integration usage but cannot mutate them. Only owners can grant, change, or
+revoke account access. Role changes end that account's existing sessions;
+revocation also invalidates unused codes. The current owner cannot revoke or
+change their own access. Account JSON mutations are serialized across PM2
+workers, and the lock file is ignored by git. A verification code permits at
+most five failed code/password attempts. If SMTP delivery fails, the unsent
+code is invalidated so the recipient can request a new one.
 
 Set these values in `.env.local`:
 

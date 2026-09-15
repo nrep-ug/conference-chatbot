@@ -22,7 +22,7 @@ import {
   Wifi,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   CONFERENCE_KNOWLEDGE_LIMITS,
   formatConferenceKnowledgeValidationError,
@@ -31,6 +31,7 @@ import {
   validateConferenceKnowledgeItems,
 } from "@/lib/conference-knowledge-validation";
 import BrandLogo from "../components/brand-logo";
+import Access from "./access";
 import Integrations, { AdminDialog, integrationRequest } from "./integrations";
 import "./admin.css";
 
@@ -837,7 +838,7 @@ function AuthPanel({ onAuthenticated }) {
           </h1>
           <p>
             {emailState === EMAIL_STATE.idle
-              ? "An approved administrator email is required."
+              ? "An approved account email is required."
               : "Enter your password and email verification code."}
           </p>
           {emailState === EMAIL_STATE.idle ? (
@@ -968,6 +969,7 @@ function AuthPanel({ onAuthenticated }) {
 }
 
 function Dashboard({ user, status, refreshStatus, onLogout }) {
+  const canManage = user?.role === "owner" || user?.role === "admin";
   const [view, setView] = useState("overview");
   const [busyAction, setBusyAction] = useState("");
   const [notice, setNotice] = useState("");
@@ -978,13 +980,13 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
   const snapshot = status?.snapshot,
     vectorStore = status?.vectorStore,
     runtime = status?.runtime;
-  const navigation = [
+  const navigation = useMemo(() => [
     ["overview", "Overview", Activity],
     ["knowledge", "Visitor knowledge", Wifi],
     ["runtime", "Data & runtime", Database],
     ["integrations", "API integrations", KeyRound],
-    ["access", "Admin access", ShieldCheck],
-  ];
+    ["access", "Team access", ShieldCheck],
+  ].filter(([id]) => canManage || id !== "knowledge"), [canManage]);
   async function loadRegistry() {
     setRegistryLoading(true);
     setRegistryError("");
@@ -1010,12 +1012,7 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
       });
     const updateView = () => {
       const name = location.hash.slice(1);
-      if (
-        ["overview", "knowledge", "runtime", "integrations", "access"].includes(
-          name,
-        )
-      )
-        setView(name);
+      setView(navigation.some(([id]) => id === name) ? name : "overview");
     };
     updateView();
     window.addEventListener("hashchange", updateView);
@@ -1023,7 +1020,7 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
       cancelled = true;
       window.removeEventListener("hashchange", updateView);
     };
-  }, []);
+  }, [navigation]);
   async function refreshBot(rebuildQdrant) {
     setBusyAction("refresh");
     setNotice("");
@@ -1171,7 +1168,7 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
           </span>
           <span className="admin-badge muted">
             <ShieldCheck size={13} />
-            Administrator
+            {user?.role === "owner" ? "Owner" : user?.role === "admin" ? "Administrator" : "Viewer"}
           </span>
         </header>
         <div className="admin-content">
@@ -1364,9 +1361,11 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
               </section>
             </div>
           )}
-          <div hidden={view !== "knowledge"}>
-            <KnowledgeEditor onStatusRefresh={refreshStatus} />
-          </div>
+          {canManage && (
+            <div hidden={view !== "knowledge"}>
+              <KnowledgeEditor onStatusRefresh={refreshStatus} />
+            </div>
+          )}
           {view === "runtime" && (
             <div className="admin-view">
               <section className="admin-band">
@@ -1405,7 +1404,7 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
                     </div>
                   ))}
                 </div>
-                <div className="admin-toolbar">
+                {canManage && <div className="admin-toolbar">
                   <button
                     className="admin-button primary"
                     disabled={Boolean(busyAction)}
@@ -1422,7 +1421,7 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
                     <Database size={16} />
                     Refresh & rebuild index
                   </button>
-                </div>
+                </div>}
               </section>
               <div className="admin-overview-grid">
                 <section className="admin-band">
@@ -1493,64 +1492,11 @@ function Dashboard({ user, status, refreshStatus, onLogout }) {
               reload={loadRegistry}
               loading={registryLoading}
               loadError={registryError}
+              canManage={canManage}
             />
           )}
           {view === "access" && (
-            <div className="admin-view">
-              <div className="admin-section-heading">
-                <h2>Approved administrators</h2>
-                <span className="admin-badge muted">
-                  <ShieldCheck size={14} />
-                  Email verification
-                </span>
-              </div>
-              <div className="admin-table-wrap">
-                <table className="admin-table">
-                  <thead>
-                    <tr>
-                      <th>Administrator</th>
-                      <th>Email</th>
-                      <th>Account status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(status?.auth?.users || []).map((item) => (
-                      <tr key={item.email}>
-                        <td>
-                          <strong>{item.username || "Pending setup"}</strong>
-                        </td>
-                        <td>{item.email}</td>
-                        <td>
-                          <span
-                            className={
-                              "admin-badge " +
-                              (item.configured ? "positive" : "warning")
-                            }
-                          >
-                            {item.configured ? "Configured" : "Pending"}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <section className="admin-band">
-                <h2>Session security</h2>
-                <div className="admin-definition">
-                  <span>Signed in as</span>
-                  <strong>{user?.email}</strong>
-                </div>
-                <div className="admin-definition">
-                  <span>Authentication</span>
-                  <strong>Password and email verification code</strong>
-                </div>
-                <div className="admin-definition">
-                  <span>Allowlist</span>
-                  <strong>Server managed</strong>
-                </div>
-              </section>
-            </div>
+            <Access user={user} onStatusRefresh={refreshStatus} />
           )}
         </div>
         <footer className="admin-footer">
