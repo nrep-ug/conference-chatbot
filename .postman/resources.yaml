@@ -1,0 +1,7 @@
+# Use this workspace to collaborate
+workspace:
+  id: 7840c64d-179c-424c-a218-84605337d907
+
+localResources:
+  specs:
+    - ../public/rec-chat.openapi.json

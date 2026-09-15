@@ -42,8 +42,11 @@ The widget and anonymous mobile-session flow are not part of this release.
 Set ADMIN_APP_ORIGIN to the admin's public origin behind a reverse proxy.
 Only enable trusted IP headers after configuring the proxy and firewall.
 
-See [the API integration guide](docs/chat-api.md) for examples, streaming,
-limits, deployment, backup, privacy and testing, and [OpenAPI](public/rec-chat.openapi.json).
+Start with the [developer integration guide](docs/developer-integration.md) for
+website, mobile and server examples, conversation history, streaming, and
+Postman. See the [API reference](docs/chat-api.md) for limits, deployment,
+backup, privacy and testing, and [OpenAPI](public/rec-chat.openapi.json) for
+client tooling.
 
 ## Environment
 

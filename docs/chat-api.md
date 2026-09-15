@@ -1,5 +1,9 @@
 # REC Chat API v1
 
+New to API integrations? Start with the [developer guide](developer-integration.md)
+for a first request and website, mobile, and server examples. This document
+is the concise API and operations reference.
+
 All integrations use the same public REC knowledge and answering engine: the
 active edition, published historical editions, and published visitor guidance.
 The API cannot read private registrations or select arbitrary tables or models.
