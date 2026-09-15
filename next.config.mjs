@@ -1,6 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactCompiler: true,
+  outputFileTracingExcludes: {
+    "/*": ["./data/admin/**"],
+  },
   images: {
     remotePatterns: [
       {

@@ -1,6 +1,7 @@
 import {
   createHmac,
   randomBytes,
+  randomInt,
   scrypt as scryptCallback,
   timingSafeEqual,
 } from "node:crypto";
@@ -69,7 +70,7 @@ function hasStableAuthSecret() {
 
 async function writeAtomic(filePath, content) {
   await mkdir(path.dirname(filePath), { recursive: true });
-  const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const temporaryPath = `${filePath}.${process.pid}.${randomBytes(12).toString("hex")}.tmp`;
   await writeFile(temporaryPath, content, "utf8");
   await rename(temporaryPath, filePath);
 }
@@ -104,7 +105,6 @@ async function readStore() {
     const seed = normalizeStore(
       JSON.parse(await readFile(AUTH_EXAMPLE_FILE, "utf8"))
     );
-    await writeStore(seed);
     return seed;
   }
 }
@@ -204,8 +204,7 @@ async function verifyPassword(clientPasswordHash, user) {
 }
 
 export async function getAdminAuthState() {
-  let store = cleanExpired(await readStore());
-  await writeStore(store);
+  const store = cleanExpired(await readStore());
 
   return {
     configuredUsers: store.users.filter(isUserConfigured).length,
@@ -242,7 +241,7 @@ export async function createAdminLoginCode(email) {
     };
   }
 
-  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const code = String(randomInt(100000, 1000000));
   const createdAt = nowIso();
   const expiresAt = new Date(Date.now() + CODE_TTL_MS).toISOString();
   const codeHash = hmac(`${normalizedEmail}:${code}`);
@@ -397,12 +396,10 @@ export async function getAdminSession(token) {
   );
 
   if (!session) {
-    await writeStore(store);
     return null;
   }
 
   const user = findUser(store, session.email);
-  await writeStore(store);
 
   return user ? sanitizeUser(user) : null;
 }

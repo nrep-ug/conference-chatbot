@@ -12,7 +12,7 @@ The chat route streams responses to the browser, answers exact public conference
 
 ## Requirements
 
-- Node.js with built-in `fetch` and `--env-file` support
+- Node.js 22.13 or newer (Node 24 LTS recommended); built-in SQLite is required
 - npm
 - Docker and Docker Compose for Qdrant
 - Ollama installed and running
@@ -24,6 +24,26 @@ Install the expected Ollama models:
 ollama pull qwen2.5:7b
 ollama pull nomic-embed-text
 ```
+
+## Registered APIs And Administration
+
+The redesigned admin workspace has separate Overview, Visitor knowledge,
+Data & runtime, API integrations, and Admin access views. Existing SMTP sign-in,
+knowledge publication, and data refresh remain available.
+
+Register application backends under **API integrations** to issue expiring API
+keys for POST /api/v1/chat. All integrations share public REC knowledge.
+JSON and SSE use the same answer engine as the public chat. Keys are shown once,
+stored hashed in a local SQLite registry, and can be disabled, rotated or revoked.
+Per-integration quotas and a global concurrency ceiling work across PM2 workers.
+
+**Keep keys on website/mobile backends, never inside browsers or mobile binaries.**
+The widget and anonymous mobile-session flow are not part of this release.
+Set ADMIN_APP_ORIGIN to the admin's public origin behind a reverse proxy.
+Only enable trusted IP headers after configuring the proxy and firewall.
+
+See [the API integration guide](docs/chat-api.md) for examples, streaming,
+limits, deployment, backup, privacy and testing, and [OpenAPI](public/rec-chat.openapi.json).
 
 ## Environment
 

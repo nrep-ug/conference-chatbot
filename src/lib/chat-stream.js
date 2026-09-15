@@ -1,4 +1,4 @@
-// Transport lifecycle only; answer selection and validation stay in the chat route.
+// Transport lifecycle only; answer selection and validation stay in the chat service.
 export function createSseResponse(run, { signal: parentSignal, headers = {}, heartbeatMs = 15000 } = {}) {
   const operation = new AbortController();
   const signal = parentSignal ? AbortSignal.any([parentSignal, operation.signal]) : operation.signal;

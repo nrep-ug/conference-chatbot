@@ -4,5 +4,5 @@ import { handleChatRequest } from "@/lib/chat-service";
 export const runtime = "nodejs";
 
 export function POST(request) {
-  return serveChatApi(request, { run: handleChatRequest });
+  return serveChatApi(request, { versioned: true, run: handleChatRequest });
 }
