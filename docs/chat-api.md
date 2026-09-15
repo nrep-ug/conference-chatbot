@@ -155,6 +155,9 @@ invalid-key floods and slow uploads; application quotas do not replace those.
 Set proxy response timeouts above the API deadline and disable SSE buffering.
 ADMIN_APP_ORIGIN is the external admin origin, without a trailing slash.
 The backend-only key route requires no website domain registration.
+For the `chat.nrep.ug` nginx site, configure unbuffered exact-match locations
+for both `/api/chat` and `/api/v1/chat` as shown in the README's Reverse Proxy
+Notes. The current `/api/chat` location does not cover `/api/v1/chat`.
 
 SQLite credentials, quotas, request leases and audit records are shared atomically
 by PM2 workers on one VPS. Values use SQL parameter binding. Dead-worker leases

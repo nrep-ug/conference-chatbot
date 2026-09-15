@@ -606,7 +606,9 @@ or untagged documents from being appended to scoped answers.
 
 Use nginx or another reverse proxy in front of Next.js in production.
 
-Because `/api/chat` streams responses, disable proxy buffering for that route. The app also sets `X-Accel-Buffering: no` for `/api/chat`.
+Both `/api/chat` and `/api/v1/chat` can stream responses. Give each route an
+unbuffered location; otherwise `/api/v1/chat` falls through to `location /`.
+The app also sends `X-Accel-Buffering: no` for streamed responses.
 
 Example nginx location:
 
@@ -620,9 +622,10 @@ location / {
   proxy_set_header X-Forwarded-Proto $scheme;
 }
 
-location /api/chat {
+location = /api/chat {
   proxy_pass http://127.0.0.1:3000;
   proxy_http_version 1.1;
+  client_max_body_size 64k;
   proxy_buffering off;
   proxy_cache off;
   proxy_set_header Connection "";
@@ -630,8 +633,35 @@ location /api/chat {
   proxy_set_header X-Real-IP $remote_addr;
   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
   proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_read_timeout 300s;
+  proxy_send_timeout 300s;
+}
+
+location = /api/v1/chat {
+  proxy_pass http://127.0.0.1:3000;
+  proxy_http_version 1.1;
+  client_max_body_size 64k;
+  proxy_buffering off;
+  proxy_cache off;
+  proxy_set_header Connection "";
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_read_timeout 300s;
+  proxy_send_timeout 300s;
 }
 ```
+
+For the existing `chat.nrep.ug` site, keep the SSL and Certbot sections intact:
+change its `/api/chat` location to the exact match shown above and add the
+`/api/v1/chat` location inside the HTTPS server. The site's existing 10M body
+limit can remain for admin routes; the two chat locations use a smaller limit.
+Run `sudo nginx -t` before `sudo systemctl reload nginx`. Set
+`ADMIN_APP_ORIGIN=https://chat.nrep.ug` in the VPS `.env.local`. Set
+`CHAT_API_TRUSTED_IP_HEADER=x-real-ip` only after confirming port 3000 cannot
+be reached directly from the public network. See [Chat API](docs/chat-api.md)
+for the integration settings and key lifecycle.
 
 ## Troubleshooting
 
